@@ -29,10 +29,12 @@
  */
 
 static void push_help(void) {
-    printf("usage: mgit push [<remote>] [<branch>]\n\n");
+    printf("usage: mgit push [-f|--force] [<remote>] [<branch>]\n\n");
     printf("Update remote refs along with associated objects.\n");
     printf("Defaults: remote 'origin', current branch.\n");
     printf("Supports local paths and http(s) URLs (Git Smart HTTP).\n");
+    printf("\nOptions:\n");
+    printf("    -f, --force    Skip the fast-forward check (rewrite history)\n");
 }
 
 /* 判断是否为网络 URL */
@@ -221,7 +223,7 @@ static int collect_push_objects(ObjectStore *store, const Hash *tip,
  */
 static int push_to_url(const char *url,
                        const char *ref_name, const char *branch,
-                       const Hash *local_hash) {
+                       const Hash *local_hash, int force) {
     /* 1. 引用广告 */
     RefAd ad;
     if (transport_get_refs_service(url, "git-receive-pack", &ad) != 0) {
@@ -245,14 +247,14 @@ static int push_to_url(const char *url,
         return 0;
     }
 
-    /* 3. 快进检查 */
-    if (!hash_is_zero(&old_hash)) {
+    /* 3. 快进检查（--force 时跳过，与真实 git 一致：服务端仍有最终拒绝权） */
+    if (!force && !hash_is_zero(&old_hash)) {
         ObjectStore *store = object_store_open(".git");
         int ff = store && commit_is_ancestor(store, &old_hash, local_hash);
         if (store) object_store_close(store);
         if (!ff) {
             mgit_error("failed to push: non-fast-forward "
-                       "(fetch and merge first)");
+                       "(fetch and merge first, or use --force)");
             ref_ad_free(&ad);
             return -1;
         }
@@ -313,8 +315,16 @@ static int push_to_url(const char *url,
     if (hash_is_zero(&old_hash)) {
         printf(" * [new branch]      %s -> %s\n", branch, branch);
     } else {
-        printf("   %.7s..%.7s  %s -> %s\n", old_hex, new_hex,
-               branch, branch);
+        int ff = 0;
+        ObjectStore *chk = object_store_open(".git");
+        if (chk) { ff = commit_is_ancestor(chk, &old_hash, local_hash); object_store_close(chk); }
+        if (ff) {
+            printf("   %.7s..%.7s  %s -> %s\n", old_hex, new_hex,
+                   branch, branch);
+        } else {
+            printf(" + %.7s...%.7s  %s -> %s (forced update)\n",
+                   old_hex, new_hex, branch, branch);
+        }
     }
     return 0;
 }
@@ -322,14 +332,21 @@ static int push_to_url(const char *url,
 static int push_run(int argc, char **argv) {
     const char *remote_name = "origin";
     const char *branch = NULL;
+    int force = 0;
 
+    int pos = 0;   /* 位置参数计数（不受 -f 等选项干扰） */
     for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-f") == 0 || strcmp(argv[i], "--force") == 0) {
+            force = 1;
+            continue;
+        }
         if (argv[i][0] == '-') continue;
-        if (i == 1) {
+        if (pos == 0) {
             remote_name = argv[i];
         } else if (!branch) {
             branch = argv[i];
         }
+        pos++;
     }
 
     RefManager *refs = ref_manager_open(".git");
@@ -372,7 +389,7 @@ static int push_run(int argc, char **argv) {
 
     /* 网络 URL：走 Smart HTTP 协议 */
     if (is_url(remote_path)) {
-        int rc = push_to_url(remote_path, ref_name, branch, &local_hash);
+        int rc = push_to_url(remote_path, ref_name, branch, &local_hash, force);
         ref_manager_close(refs);
         return rc;
     }
@@ -392,10 +409,11 @@ static int push_run(int argc, char **argv) {
         return -1;
     }
 
-    /* 快进检查 */
+    /* 快进检查（--force 时跳过） */
     Hash remote_hash;
     char old_hex[HASH_HEX_SIZE] = {0};
     int is_new = 1;
+    int remote_ff = 1;   /* 远端旧 tip 是否本地祖先（用于输出样式） */
     if (ref_resolve_quiet(remote_refs, ref_name, &remote_hash) == 0) {
         is_new = 0;
         hash_to_hex(&remote_hash, old_hex);
@@ -404,9 +422,10 @@ static int push_run(int argc, char **argv) {
             int ff = local_store &&
                      commit_is_ancestor(local_store, &remote_hash, &local_hash);
             if (local_store) object_store_close(local_store);
-            if (!ff) {
+            remote_ff = ff;
+            if (!ff && !force) {
                 mgit_error("failed to push: non-fast-forward "
-                           "(fetch and merge first)");
+                           "(fetch and merge first, or use --force)");
                 ref_manager_close(remote_refs);
                 ref_manager_close(refs);
                 return -1;
@@ -436,8 +455,11 @@ static int push_run(int argc, char **argv) {
     printf("To %s\n", remote_path);
     if (is_new) {
         printf(" * [new branch]      %s -> %s\n", branch, branch);
-    } else {
+    } else if (remote_ff) {
         printf("   %.7s..%.7s  %s -> %s\n", old_hex, new_hex, branch, branch);
+    } else {
+        printf(" + %.7s...%.7s  %s -> %s (forced update)\n",
+               old_hex, new_hex, branch, branch);
     }
 
     ref_manager_close(remote_refs);

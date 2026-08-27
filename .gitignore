@@ -10,3 +10,5 @@ tests/catf_*
 tests/work
 tests/*_t_*
 tests/*_x?_*
+tests/cp_t2_*
+tests/rb_t2_*

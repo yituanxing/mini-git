@@ -35,9 +35,11 @@ static void write_u16(uint8_t *p, uint16_t v) {
     p[1] = (uint8_t)(v);
 }
 
-/* 计算条目填充后的大小 (Git 规范: 条目大小 = 62 + name_len, 填充到 8 字节对齐) */
+/* 计算条目填充后的大小 (Git 规范: 条目大小 = 62 + name_len + 1 个 NUL,
+ * 填充到 8 字节对齐。注意必须把结尾 NUL 计入长度，否则与真实 git 的
+ * 边界差 1 字节，逐条累积后真实 git 会报 "unknown index entry format") */
 static size_t entry_padded_size(size_t name_len) {
-    size_t entry_len = 62 + name_len;
+    size_t entry_len = 62 + name_len + 1;
     return (entry_len + 7) & ~7;
 }
 
