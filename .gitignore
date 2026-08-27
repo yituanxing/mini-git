@@ -1,0 +1,12 @@
+# Build artifacts
+build/
+*.o
+*.exe
+
+# Test leftovers (timestamped scratch repos created by test scripts)
+tests/tmp_*
+tests/deep_t_*
+tests/catf_*
+tests/work
+tests/*_t_*
+tests/*_x?_*
