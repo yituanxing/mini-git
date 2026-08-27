@@ -11,9 +11,11 @@
 /*
  * remote 配置与对象传输实现
  *
- * 配置格式（.git/config）：
+ * 配置格式（.git/config，与真实 git 一致，键名为 url）：
  *   [remote "origin"]
- *       path = C:/path/to/repo
+ *       url = C:/path/to/repo
+ *
+ * 历史版本曾用 path = ；读取时两种都认，写出统一用 url。
  *
  * 传输原理：Git 对象按内容寻址，松散对象文件可以直接按字节复制。
  */
@@ -60,11 +62,16 @@ static int match_remote_section(const char *line, char *name_out, size_t nsz) {
     return 1;
 }
 
-/* 解析 "    path = value" 行；返回 1 表示是 path 行 */
+/* 解析 "\turl = value"（或旧格式 "path ="）行；返回 1 表示命中 */
 static int parse_path_line(const char *line, char *val, size_t vsz) {
     while (*line == ' ' || *line == '\t') line++;
-    if (strncmp(line, "path", 4) != 0) return 0;
-    line += 4;
+    if (strncmp(line, "url", 3) == 0) {
+        line += 3;
+    } else if (strncmp(line, "path", 4) == 0) {
+        line += 4;
+    } else {
+        return 0;
+    }
     while (*line == ' ' || *line == '\t') line++;
     if (*line != '=') return 0;
     line++;
@@ -109,6 +116,16 @@ int remote_config_get(const char *git_dir, const char *name,
 }
 
 int remote_config_set(const char *git_dir, const char *name, const char *path) {
+    /* 反斜杠 → 正斜杠：git config 把反斜杠当转义符（\U \D 非法），
+     * 真实 git 对 Windows 路径也一律写 C:/... 形式 */
+    char norm[512];
+    size_t i;
+    for (i = 0; path[i] && i < sizeof(norm) - 1; i++) {
+        norm[i] = (path[i] == '\\') ? '/' : path[i];
+    }
+    norm[i] = 0;
+    path = norm;
+
     char buf[CONFIG_MAX];
     config_read(git_dir, buf, sizeof(buf));
 
@@ -133,7 +150,7 @@ int remote_config_set(const char *git_dir, const char *name, const char *path) {
             /* 离开目标段时若还没替换，补一行 path */
             if (in_target && !replaced) {
                 o += (size_t)snprintf(out + o, sizeof(out) - o,
-                                      "\tpath = %s\n", path);
+                                      "\turl = %s\n", path);
                 replaced = 1;
             }
             char sec[64];
@@ -145,7 +162,7 @@ int remote_config_set(const char *git_dir, const char *name, const char *path) {
             if (parse_path_line(line, val, sizeof(val))) {
                 /* 替换旧值 */
                 o += (size_t)snprintf(out + o, sizeof(out) - o,
-                                      "\tpath = %s\n", path);
+                                      "\turl = %s\n", path);
                 replaced = 1;
                 p = nl ? nl + 1 : NULL;
                 continue;
@@ -158,7 +175,7 @@ int remote_config_set(const char *git_dir, const char *name, const char *path) {
 
     if (in_target && !replaced) {
         o += (size_t)snprintf(out + o, sizeof(out) - o,
-                              "\tpath = %s\n", path);
+                              "\turl = %s\n", path);
         replaced = 1;
     }
 
@@ -168,7 +185,7 @@ int remote_config_set(const char *git_dir, const char *name, const char *path) {
             o += (size_t)snprintf(out + o, sizeof(out) - o, "\n");
         }
         snprintf(out + o, sizeof(out) - o,
-                 "[remote \"%s\"]\n\tpath = %s\n", name, path);
+                 "[remote \"%s\"]\n\turl = %s\n", name, path);
     }
 
     return config_write(git_dir, out);

@@ -10,7 +10,7 @@
  *
  * remote 配置存储在 .git/config，格式与 Git 兼容：
  *   [remote "origin"]
- *       path = C:/path/to/repo
+ *       url = C:/path/to/repo
  *
  * 对象传输：远程仓库就是一个本地目录（含 .git 子目录），
  * 对象按内容寻址，直接复制松散对象文件即可。
