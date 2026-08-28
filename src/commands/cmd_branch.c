@@ -44,6 +44,11 @@ static int branch_run(int argc, char **argv) {
         /* 列出所有分支 */
         char branches[64][256];
         int count = ref_list_branches(refs, branches, 64);
+        if (count == -2) {
+            mgit_error("too many branches to list safely (limit 64)");
+            ref_manager_close(refs);
+            return -1;
+        }
 
         if (count == 0) {
             printf("(no branches)\n");
