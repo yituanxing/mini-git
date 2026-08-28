@@ -61,10 +61,34 @@ static int hex_file_read(const char *path, char *hex, size_t size) {
     return 0;
 }
 
-static int todo_write(Hash *list, int count) {
+typedef struct {
+    Hash *items;
+    size_t count;
+    size_t cap;
+} HashList;
+
+static void hashlist_free(HashList *list) {
+    free(list->items);
+    list->items = NULL;
+    list->count = list->cap = 0;
+}
+
+static int hashlist_push(HashList *list, const Hash *hash) {
+    if (list->count == list->cap) {
+        size_t ncap = list->cap ? list->cap * 2 : 32;
+        Hash *p = (Hash *)realloc(list->items, ncap * sizeof(Hash));
+        if (!p) return -1;
+        list->items = p;
+        list->cap = ncap;
+    }
+    list->items[list->count++] = *hash;
+    return 0;
+}
+
+static int todo_write(const Hash *list, size_t count) {
     FILE *fp = fopen(REBASE_TODO, "wb");
     if (!fp) return -1;
-    for (int i = 0; i < count; i++) {
+    for (size_t i = 0; i < count; i++) {
         char hex[HASH_HEX_SIZE];
         hash_to_hex(&list[i], hex);
         fprintf(fp, "%s\n", hex);
@@ -73,20 +97,23 @@ static int todo_write(Hash *list, int count) {
     return 0;
 }
 
-static int todo_read(Hash *list, int max) {
+static int todo_read(HashList *list) {
     FILE *fp = fopen(REBASE_TODO, "rb");
     if (!fp) return 0;
-    int count = 0;
+
     char line[64];
-    while (count < max && fgets(line, sizeof(line), fp)) {
-        /* 去掉换行 */
+    while (fgets(line, sizeof(line), fp)) {
         line[strcspn(line, "\r\n")] = 0;
-        if (strlen(line) == 40 && hex_to_hash(line, &list[count]) == 0) {
-            count++;
+        Hash h;
+        if (strlen(line) != 40 || hex_to_hash(line, &h) != 0 ||
+            hashlist_push(list, &h) != 0) {
+            fclose(fp);
+            hashlist_free(list);
+            return -1;
         }
     }
     fclose(fp);
-    return count;
+    return 0;
 }
 
 static void state_cleanup(void) {
@@ -100,43 +127,93 @@ static int rebase_in_progress(void) {
 }
 
 /*
- * 收集 HEAD 有而 upstream 没有的提交（BFS）
- * 返回数量；结果按"新→旧"顺序，调用者需反转
+ * 收集需要重放的“当前分支独有提交”。
+ *
+ * mgit 的教学版 rebase 刻意只支持线性历史：沿 first-parent 从 HEAD
+ * 向后走，直到碰到 upstream 已经包含的 commit。若途中出现 merge commit，
+ * 明确拒绝，而不是假装选择某个 parent。
+ *
+ * 输出顺序是 新 -> 旧；调用者重放前反转成 旧 -> 新。
  */
 static int collect_local_commits(ObjectStore *store, const Hash *head,
-                                 const Hash *upstream, Hash *out, int max) {
-    int count = 0;
-    Hash queue[1000];
-    Hash visited[1000];
-    int vcount = 0;
-    int head_q = 0, tail = 0;
-    queue[tail++] = *head;
+                                 const Hash *upstream, HashList *out) {
+    Hash cur = *head;
 
-    while (head_q < tail && head_q < 999) {
-        Hash cur = queue[head_q++];
-
-        /* 去重 */
-        int seen = 0;
-        for (int i = 0; i < vcount; i++) {
-            if (hash_equal(&cur, &visited[i])) { seen = 1; break; }
+    while (!graph_is_ancestor(store, &cur, upstream)) {
+        Commit commit;
+        memset(&commit, 0, sizeof(commit));
+        if (commit_read(store, &cur, &commit) != 0) {
+            hashlist_free(out);
+            return -1;
         }
-        if (seen) continue;
-        if (vcount < 1000) visited[vcount++] = cur;
 
-        /* 在 upstream 历史中 → 不收集，且不再向下遍历 */
-        if (graph_is_ancestor(store, &cur, upstream)) continue;
-
-        if (count < max) out[count++] = cur;
-
-        Commit c;
-        memset(&c, 0, sizeof(c));
-        if (commit_read(store, &cur, &c) != 0) continue;
-        for (int i = 0; i < c.parent_count; i++) {
-            if (tail < 1000) queue[tail++] = c.parents[i];
+        if (commit.parent_count > 1) {
+            mgit_error("cannot rebase a history containing merge commits");
+            mgit_error("mgit intentionally does not implement --rebase-merges");
+            commit_free(&commit);
+            hashlist_free(out);
+            return -1;
         }
-        commit_free(&c);
+
+        if (hashlist_push(out, &cur) != 0) {
+            commit_free(&commit);
+            hashlist_free(out);
+            return -1;
+        }
+
+        if (commit.parent_count == 0) {
+            commit_free(&commit);
+            mgit_error("cannot rebase histories with no common ancestor");
+            hashlist_free(out);
+            return -1;
+        }
+
+        cur = commit.parents[0];
+        commit_free(&commit);
     }
-    return count;
+
+    return 0;
+}
+
+/* rebase 会整体恢复 tree，因此使用简单、保守的 clean tracked-state gate。 */
+static int rebase_precheck(ObjectStore *store, Index *idx, const Hash *head_hash) {
+    Commit head;
+    memset(&head, 0, sizeof(head));
+    if (commit_read(store, head_hash, &head) != 0) return -1;
+
+    Hash index_tree;
+    if (index_write_tree(idx, store, &index_tree) != 0) {
+        commit_free(&head);
+        return -1;
+    }
+    if (!hash_equal(&index_tree, &head.tree)) {
+        commit_free(&head);
+        mgit_error("cannot rebase with staged changes");
+        mgit_error("commit or reset the Index before rebasing");
+        return -1;
+    }
+    commit_free(&head);
+
+    for (size_t i = 0; i < idx->count; i++) {
+        uint8_t *data = NULL;
+        size_t size = 0;
+        if (file_read_all(idx->entries[i].name, &data, &size) != 0) {
+            mgit_error("cannot rebase with unstaged deletion: %s",
+                       idx->entries[i].name);
+            return -1;
+        }
+
+        Hash wt;
+        object_hash(OBJ_BLOB, data, size, &wt);
+        free(data);
+        if (!hash_equal(&wt, &idx->entries[i].hash)) {
+            mgit_error("cannot rebase with unstaged changes: %s",
+                       idx->entries[i].name);
+            mgit_error("commit or stash your changes before rebasing");
+            return -1;
+        }
+    }
+    return 0;
 }
 
 /* 把工作区和 Index 恢复为指定 commit 的 tree */
