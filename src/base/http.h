@@ -5,14 +5,18 @@
 #include <stdint.h>
 
 /*
- * 极简 HTTP 客户端（基于 Windows WinHTTP，自带 TLS）
+ * 极简 HTTP 客户端接口。
  *
  * 只覆盖 Git Smart HTTP 需要的能力：
  * - GET / POST（二进制请求与响应）
- * - 自动跟随重定向（301/302/303/307）
+ * - 自动跟随重定向
  * - URL 内嵌 user:pass 时走 Basic 认证
  *
- * 注意：当前仅 Windows 平台可用（winhttp 库）。
+ * 平台后端由构建系统选择：
+ * - Windows: WinHTTP（系统自带 TLS）
+ * - Linux:   libcurl
+ *
+ * transport/core 层只依赖这份接口，不感知具体 HTTP 实现。
  */
 
 typedef struct {

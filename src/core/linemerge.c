@@ -339,8 +339,13 @@ int linemerge_3way(const char *base_data, size_t base_size,
         free(out.buf);
         return -1;
     }
-    *out_data = out.buf ? out.buf : strdup("");
-    if (!*out_data) return -1;
+    if (out.buf) {
+        *out_data = out.buf;
+    } else {
+        *out_data = (char *)malloc(1);
+        if (!*out_data) return -1;
+        (*out_data)[0] = 0;
+    }
     *out_size = out.len;
     return 0;
 }

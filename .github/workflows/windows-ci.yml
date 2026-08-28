@@ -1,0 +1,69 @@
+name: Windows CI
+
+on:
+  push:
+    branches:
+      - master
+      - audit/teaching-correctness
+      - port/linux-support
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: MinGW + shared Python tests
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up MSYS2 UCRT64 toolchain
+        id: msys2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-make
+            mingw-w64-ucrt-x86_64-zlib
+
+      - name: Build mgit
+        shell: powershell
+        run: |
+          $ucrt = "${{ steps.msys2.outputs.msys2-location }}\ucrt64\bin"
+          $env:Path = "$ucrt;$env:Path"
+          $env:SHELL = "cmd.exe"
+          gcc --version
+          python --version
+          mingw32-make --version
+          mingw32-make SHELL=cmd.exe
+
+      - name: Run shared Python suite
+        shell: powershell
+        run: |
+          $ucrt = "${{ steps.msys2.outputs.msys2-location }}\ucrt64\bin"
+          $env:Path = "$ucrt;$env:Path"
+          $env:SHELL = "cmd.exe"
+          mingw32-make SHELL=cmd.exe test
+
+      - name: Run legacy Windows regression safety net
+        shell: powershell
+        run: |
+          $ucrt = "${{ steps.msys2.outputs.msys2-location }}\ucrt64\bin"
+          $env:Path = "$ucrt;$env:Path"
+          $env:SHELL = "cmd.exe"
+          mingw32-make SHELL=cmd.exe test-legacy
+
+      - name: Upload mgit.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: mgit-windows-x64
+          path: build/mgit.exe
+          if-no-files-found: error
