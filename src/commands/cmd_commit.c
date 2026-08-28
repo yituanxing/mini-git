@@ -190,7 +190,6 @@ static int commit_run(int argc, char **argv) {
             mgit_error("failed to create merge commit");
             goto error;
         }
-        file_delete(".git/MERGE_HEAD");
     } else if (commit_create(store, &tree_hash, parent_ptr, message, &commit_hash) != 0) {
         mgit_error("failed to create commit");
         goto error;
@@ -219,6 +218,15 @@ static int commit_run(int argc, char **argv) {
     if (ref_update(refs, branch_ref, &commit_hash) != 0) {
         mgit_error("failed to update branch: %s", branch_ref);
         goto error;
+    }
+
+    /*
+     * MERGE_HEAD belongs to the merge transaction.  Remove it only after
+     * the branch ref was updated successfully; otherwise a failed commit
+     * must remain resumable.
+     */
+    if (in_merge && file_delete(".git/MERGE_HEAD") != 0) {
+        mgit_warning("merge commit created but failed to remove MERGE_HEAD");
     }
 
     const char *branch_name = branch_ref;
