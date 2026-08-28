@@ -43,7 +43,7 @@ Git 的本质是一个**以 SHA-1 哈希为键的对象数据库**。任何内�
 | `blob` | 文件内容（不含文件名！） | 一张"文件内容快照" |
 | `tree` | 若干 `<模式> <名字>\0<哈希>` 条目 | 目录清单：谁叫什么名、指向哪个 blob/子 tree |
 | `commit` | tree 哈希 + 父提交哈希 + 作者/时间 + 消息 | 一次"存档"，指着一个目录快照，串着历史 |
-| `tag` | 指向某对象的哈希 + 标签信息 | 本项目只用轻量标签（见命令差异） |
+| `tag` | 指向某对象的哈希 + 标签信息 | 这是 **annotated tag object**；mgit 当前只创建 lightweight tag，因此不会创建这种对象 |
 
 关键推论：**提交记录的是整个项目的目录快照（通过 tree），不是差异**。
 "两个版本的差别"是运行时对比两棵 tree 算出来的，存储里没有"修改记录"这种东西。
@@ -107,7 +107,8 @@ src/
 │   ├── ref.*       # refs/HEAD 管理 + packed-refs 读取
 │   ├── tree.*      # tree 解析/序列化/递归展开
 │   ├── commit.*    # commit 解析/生成
-│   ├── index.*     # index v2 读写 + write-tree（含路径排序）
+│   ├── graph.*     # commit DAG 的共享祖先判断（动态遍历）
+│   ├── index.*     # index v2 读写 + write-tree（含 checksum / 路径排序）
 │   ├── linemerge.* # 行级三路合并（merge 冲突处理的核心算法）
 │   ├── ignore.*    # .gitignore 规则匹配
 │   ├── remote.*    # .git/config 中 remote 配置读写
@@ -216,13 +217,13 @@ make test
 | `add` | `mgit add <文件>... \| . \| -A` | 无 `-u`（只更新已跟踪）、无 `-p` |
 | `commit` | `mgit commit -m <消息> [-a] [--amend]` | **`-m` 必填**，没有编辑器交互；无 `--author` 等 |
 | `status` | `mgit status` | 输出格式简化；无 `-s` 等选项 |
-| `log` | `mgit log [--oneline] [-n N] [分支]` | 无 `--graph`、范围语法（`a..b`）、`-p` |
+| `log` | `mgit log [--oneline] [-n N] [分支]` | 遍历所有可达 parent，但显示顺序是简化 BFS，不等同于真实 Git 完整的 revision ordering；无 `--graph`/范围语法/`-p` |
 | `diff` | `mgit diff [--cached] [<tree> [<tree>]]` | 两个哈希时比较两棵 tree；无文件过滤参数 |
 | `branch` | `mgit branch [<名字> \| -d <名字>]` | 无 `-a`（远端分支列表）、无 `-m` 改名 |
-| `checkout` | `mgit checkout <分支或提交>`、`mgit checkout -b <新分支>` | 支持 detached HEAD；无 `-- <文件>` 单文件恢复 |
+| `checkout` | `mgit checkout <分支或提交>`、`mgit checkout -b <新分支>` | 支持 detached HEAD；为避免整棵恢复覆盖数据，mgit 要求 tracked Index/Working Tree 干净（比真实 Git 更保守）；无单文件恢复 |
 | `reset` | `mgit reset [--soft|--mixed|--hard] <哈希>` | 默认 `--mixed`，三模式与真实 Git 的三棵树语义一致；无路径级 reset |
 | `revert` | `mgit revert <提交>` | 无 `--no-commit`；merge commit 因未实现 `-m` mainline 而明确拒绝 |
-| `tag` | `mgit tag [<名字> \| -l \| -d <名字>]` | **只有轻量标签**，不支持 `-a`/`-m` 附注标签 |
+| `tag` | `mgit tag [<名字> \| -l \| -d <名字>]` | **只有 lightweight tag**：`refs/tags/name → commit`，不会创建 tag object；不支持 annotated tag |
 | `stash` | `mgit stash [push\|pop\|list\|drop]` | 默认保存 tracked 修改/删除且忽略 untracked；内部 stash 存储是教学简化，不复刻真实 refs/stash reflog/commit 图 |
 | `reflog` | `mgit reflog [show]` | 无过期清理、无按引用查看 |
 | `gc` | `mgit gc` | 打包为全量对象（无发送端风格的 delta 压缩） |
@@ -232,9 +233,9 @@ make test
 
 | 命令 | 支持的形式 | 与真实 git 的差异 |
 |---|---|---|
-| `merge` | `mgit merge <分支>` | 无 `--no-ff`/`--squash`；冲突策略为行级三路合并 |
+| `merge` | `mgit merge <分支>` | FF 与双亲 merge 语义正确；为保护数据要求 tracked 状态干净（比真实 Git 更保守）；冲突策略为简化行级三路合并 |
 | `cherry-pick` | `mgit cherry-pick <提交>` | 一次一个提交；无 sequencer/`--continue`；merge commit 因未实现 `-m` mainline 而明确拒绝 |
-| `rebase` | `mgit rebase <分支>` / `--continue` / `--abort` | 无 `-i` 交互式、无 `--onto` |
+| `rebase` | `mgit rebase <分支>` / `--continue` / `--abort` | 教学版只重放**线性本地历史**；detached HEAD 和含 merge commit 的本地历史明确拒绝；无 `-i`/`--onto`/`--rebase-merges` |
 | `pull` | `mgit pull [<remote>] [<分支>]` | 真实 Git 是 fetch + integrate；mgit 固定选择 merge 作为 integrate 策略 |
 | `fetch` | `mgit fetch [<remote>]` | 单轮协商（一次 have 往返），不做多轮收敛 |
 | `push` | `mgit push [-f|--force] [<remote>] [<分支>]` | **一次一个分支**；无 `-u`、无标签推送；默认拒绝非快进 |
@@ -259,38 +260,29 @@ make test
 | 更完整的 push 策略（多 ref、upstream 等） | 会增加工程复杂度，不帮助当前教学主线 |
 | 协议 v2 / SSH | v0 已能覆盖全部互通需求 |
 | 子模块 / 稀疏检出 / LFS | 与核心原理无关的上层功能 |
-| 发送端 delta 压缩 | 唯一"值得做的进阶题"，见扩展指南 |
+| 发送端更复杂的 delta 压缩 | 当前教学目标不需要，保持现实现即可 |
 
 ---
 
-## 四、扩展指南：想加新功能看这里
+## 四、维护原则
 
-### 4.1 加一个新命令（最简路径，约 15 分钟）
+### 4.1 当前维护方向
 
-以假想的 `mgit show` 为例：
+当前阶段**冻结横向功能扩展**。维护优先级只有三类：
 
-1. 新建 `src/commands/cmd_show.c`，照着最小的命令（如
-   [cmd_write_tree.c](src/commands/cmd_write_tree.c)，114 行）抄骨架：
-   ```c
-   static void show_help(void) { printf("usage: ..."); }
-   static int show_run(int argc, char **argv) { /* 编排流程 */ }
-   Command cmd_show = { .name = "show", .description = "...",
-                        .run = show_run, .help = show_help };
-   ```
-2. `src/main.c` 注册表加一行 `&cmd_show,`；
-3. `Makefile` 的 `SRCS` 加一行；
-4. 在 `tests/run_all.py` 增加最小 Python 回归，并尽量用真实 Git
-   作为行为 oracle。
+1. 会把 Git 核心概念教错的行为；
+2. 会破坏 Git 格式/互操作的不变量；
+3. 能用更少、更清晰代码消除同一概念的重复实现。
 
-命令实现里反复用到的"积木"：
+常用基础积木：
 
 | 想做什么 | 用什么 |
 |---|---|
 | 解析一个引用/分支名到哈希 | `ref_resolve*`（ref.h） |
 | 读对象 | `object_store_read` → 按 `obj.type` 分派 |
 | 解析提交 | `commit_parse` / `commit_free` |
-| 遍历目录 | `tree_parse` + `tree_flatten`（递归展开） |
-| 找共同祖先 | `commit_is_ancestor` / 三路合并见 merge |
+| 遍历目录 | `tree_parse` + `tree_flatten` |
+| 判断 commit 祖先关系 | `graph_is_ancestor`（graph.h） |
 | 读写暂存区 | `index_open` / `index_write` |
 
 ### 4.2 改现有命令时的原则
@@ -309,8 +301,7 @@ make test
   2. Python 原样构造请求体，确认"协议本身的理解"对不对；
   3. 转储 mgit 实际发出的字节（临时 `fwrite` 到文件），与期望逐字节比；
   4. 绕过封装直连 `git http-backend` 看服务端 stderr。
-- 升级协议 v2 的切入点：`http.c` 请求加 `Git-Protocol: version=2` 头，
-  `transport.c` 广告解析改走 v2 的 capability/ref 分段格式。
+- protocol v2 不属于当前教学目标；这里不作为待办项。
 
 ### 4.4 当前刻意保持的教学简化
 
@@ -334,5 +325,5 @@ make test
 2. 共享 Python 测试全绿，Windows/Linux CI 都通过；
 3. 涉及存储格式的：把产物丢给真实 `git fsck` / `git log` 验证；
 4. 涉及网络的：本地 `git_http_server.py` 起真服务器端到端跑一遍；
-5. 边界场景：**超过固定容量、空输入、重复执行**三种都要试
-   （本项目三个历史 bug 分别栽在这三类上）。
+5. 边界场景重点看：**超过固定容量、空输入、重复执行**。
+   commit DAG 的共享祖先遍历已经改为动态结构，新增代码不要重新引入静默固定上限。
