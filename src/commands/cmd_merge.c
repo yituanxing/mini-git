@@ -2,6 +2,7 @@
 #include "../core/object.h"
 #include "../core/tree.h"
 #include "../core/commit.h"
+#include "../core/graph.h"
 #include "../core/ref.h"
 #include "../core/index.h"
 #include "../core/linemerge.h"
@@ -50,35 +51,6 @@ static void ensure_parent_dir(const char *path) {
     }
 }
 
-/* 检查 hash 是否在 ancestors 链表中（BFS 向上遍历） */
-static int is_ancestor(ObjectStore *store, const Hash *target, const Hash *start) {
-    if (hash_equal(target, start)) return 1;
-
-    /* 简单的 BFS：最多遍历 1000 个 commit */
-    Hash queue[1000];
-    int head = 0, tail = 0;
-    queue[tail++] = *start;
-
-    while (head < tail && head < 999) {
-        Hash current = queue[head++];
-        Commit commit;
-        memset(&commit, 0, sizeof(commit));
-        if (commit_read(store, &current, &commit) != 0) continue;
-
-        for (int i = 0; i < commit.parent_count; i++) {
-            if (hash_equal(target, &commit.parents[i])) {
-                commit_free(&commit);
-                return 1;
-            }
-            if (tail < 1000) {
-                queue[tail++] = commit.parents[i];
-            }
-        }
-        commit_free(&commit);
-    }
-    return 0;
-}
-
 /* 找 merge base：从 ours 开始 BFS，找第一个也在 theirs 历史中的 commit */
 static int find_merge_base(ObjectStore *store, const Hash *ours, const Hash *theirs,
                            Hash *base_out) {
@@ -90,7 +62,7 @@ static int find_merge_base(ObjectStore *store, const Hash *ours, const Hash *the
         Hash current = queue[head++];
 
         /* 检查 current 是否在 theirs 的历史中 */
-        if (is_ancestor(store, &current, theirs)) {
+        if (graph_is_ancestor(store, &current, theirs)) {
             *base_out = current;
             return 0;
         }
@@ -450,7 +422,7 @@ static int merge_run(int argc, char **argv) {
     }
 
     /* 检查是否已经合并（theirs 是 ours 的祖先） */
-    if (is_ancestor(store, &theirs_commit, &ours_commit)) {
+    if (graph_is_ancestor(store, &theirs_commit, &ours_commit)) {
         printf("Already up to date.\n");
         ref_manager_close(refs);
         object_store_close(store);
@@ -476,7 +448,7 @@ static int merge_run(int argc, char **argv) {
     index_close(pre_idx);
 
     /* 检查 Fast-Forward：ours 是 theirs 的祖先 */
-    if (is_ancestor(store, &ours_commit, &theirs_commit)) {
+    if (graph_is_ancestor(store, &ours_commit, &theirs_commit)) {
         /* Fast-Forward！直接移动分支指针 */
         printf("Fast-forward\n");
 
