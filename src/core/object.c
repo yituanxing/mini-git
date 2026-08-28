@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <dirent.h>
+#include <ctype.h>
 
 /* 对象类型名称映射 */
 static const char *type_names[] = {
@@ -302,88 +303,104 @@ void object_free(Object *obj) {
 }
 
 /*
- * 按十六进制前缀查找对象
+ * 按十六进制前缀查找对象。
  *
- * 直接扫描 .git/objects 目录结构（xx/yyyyyy...），
- * 能找到任何存在的对象——包括 reset 后"不可达"的对象，
- * 这是 reflog 找回丢失 commit 的关键能力。
- *
- * @param prefix  十六进制前缀（1-40 字符）
- * @param type    限定对象类型；OBJ_NONE 表示不限
- * @return        0 找到，-1 未找到
+ * 与 Git 一样，abbreviated object name 必须至少 4 位且在整个对象库中
+ * 唯一。松散对象和 pack 中的同一个完整 OID 只算一次；两个不同 OID
+ * 命中同一前缀则明确报 ambiguous，而不是返回目录扫描到的第一个对象。
  */
 int object_find_by_prefix(ObjectStore *store, const char *prefix,
                           ObjectType type, Hash *out) {
     size_t plen = strlen(prefix);
-    if (plen < 1 || plen > 40) return -1;
+    if (plen < 4 || plen > 40) {
+        if (plen < 4) mgit_error("short object ID is too short: %s", prefix);
+        return -1;
+    }
+
+    char normalized[41];
+    for (size_t i = 0; i < plen; i++) {
+        unsigned char ch = (unsigned char)prefix[i];
+        if (!isxdigit(ch)) return -1;
+        normalized[i] = (char)tolower(ch);
+    }
+    normalized[plen] = 0;
+
+    Hash match;
+    int have = 0;
 
     DIR *root = opendir(store->objects_dir);
-    if (!root) return -1;
+    if (root) {
+        struct dirent *d;
+        while ((d = readdir(root)) != NULL) {
+            const char *name = d->d_name;
+            if (strlen(name) != 2) continue;
 
-    int found = -1;
-    struct dirent *d;
-    while ((d = readdir(root)) != NULL && found != 0) {
-        const char *name = d->d_name;
-        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
-        if (strlen(name) != 2) continue;  /* 对象目录是 2 位十六进制 */
-
-        /* 前缀的第一部分必须匹配目录名 */
-        if (plen >= 2) {
-            if (strncmp(name, prefix, 2) != 0) continue;
-        } else {
-            if (name[0] != prefix[0]) continue;
-        }
-
-        char subdir[1024];
-        snprintf(subdir, sizeof(subdir), "%s/%s", store->objects_dir, name);
-        DIR *sub = opendir(subdir);
-        if (!sub) continue;
-
-        struct dirent *f;
-        while ((f = readdir(sub)) != NULL) {
-            const char *fname = f->d_name;
-            if (strlen(fname) != 38) continue;  /* 对象文件名是 38 位 */
-
-            char hex[HASH_HEX_SIZE];
-            snprintf(hex, sizeof(hex), "%s%s", name, fname);
-            if (strncmp(hex, prefix, plen) != 0) continue;
-
-            Hash cand;
-            if (hex_to_hash(hex, &cand) != 0) continue;
-
-            /* 类型校验（需要读对象） */
-            if (type != OBJ_NONE) {
-                Object obj;
-                memset(&obj, 0, sizeof(obj));
-                if (object_store_read(store, &cand, &obj) != 0) continue;
-                int ok = (obj.type == type);
-                object_free(&obj);
-                if (!ok) continue;
+            if (plen >= 2) {
+                if (strncmp(name, normalized, 2) != 0) continue;
+            } else if (name[0] != normalized[0]) {
+                continue;
             }
 
-            *out = cand;
-            found = 0;
-            break;
+            char subdir[1024];
+            snprintf(subdir, sizeof(subdir), "%s/%s", store->objects_dir, name);
+            DIR *sub = opendir(subdir);
+            if (!sub) continue;
+
+            struct dirent *f;
+            while ((f = readdir(sub)) != NULL) {
+                const char *fname = f->d_name;
+                if (strlen(fname) != 38) continue;
+
+                char hex[HASH_HEX_SIZE];
+                snprintf(hex, sizeof(hex), "%s%s", name, fname);
+                if (strncmp(hex, normalized, plen) != 0) continue;
+
+                Hash cand;
+                if (hex_to_hash(hex, &cand) != 0) continue;
+
+                if (!have) {
+                    match = cand;
+                    have = 1;
+                } else if (!hash_equal(&match, &cand)) {
+                    closedir(sub);
+                    closedir(root);
+                    mgit_error("short object ID is ambiguous: %s", prefix);
+                    return -2;
+                }
+            }
+            closedir(sub);
         }
-        closedir(sub);
+        closedir(root);
     }
-    closedir(root);
-    if (found == 0) return 0;
 
-    /* 松散对象未命中：回退查 packfile（gc 后对象已打包） */
-    Hash cand;
-    if (pack_find_by_prefix(store, prefix, plen, &cand) != 0) return -1;
+    Hash packed;
+    int pr = pack_find_by_prefix(store, normalized, plen, &packed);
+    if (pr == -2) {
+        mgit_error("short object ID is ambiguous: %s", prefix);
+        return -2;
+    }
+    if (pr == 0) {
+        if (!have) {
+            match = packed;
+            have = 1;
+        } else if (!hash_equal(&match, &packed)) {
+            mgit_error("short object ID is ambiguous: %s", prefix);
+            return -2;
+        }
+    }
 
-    /* 类型校验（object_store_read 已支持从 pack 读取） */
+    if (!have) return -1;
+
+    /* Object-name uniqueness is global; type filtering happens afterwards. */
     if (type != OBJ_NONE) {
         Object obj;
         memset(&obj, 0, sizeof(obj));
-        if (object_store_read(store, &cand, &obj) != 0) return -1;
+        if (object_store_read(store, &match, &obj) != 0) return -1;
         int ok = (obj.type == type);
         object_free(&obj);
         if (!ok) return -1;
     }
 
-    *out = cand;
+    *out = match;
     return 0;
 }
