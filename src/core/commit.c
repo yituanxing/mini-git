@@ -22,6 +22,9 @@ void commit_free(Commit *commit) {
         free(commit->committer.name);
         free(commit->committer.email);
         free(commit->message);
+        free(commit->parents);
+        commit->parents = NULL;
+        commit->parent_count = 0;
         commit->author.name = NULL;
         commit->author.email = NULL;
         commit->committer.name = NULL;
@@ -73,6 +76,19 @@ static int parse_signature(const char *line, Signature *sig) {
     return 0;
 }
 
+static int commit_add_parent(Commit *commit, const char *hex) {
+    Hash parent;
+    if (hex_to_hash(hex, &parent) != 0) return -1;
+
+    size_t n = (size_t)commit->parent_count + 1;
+    Hash *p = (Hash *)realloc(commit->parents, n * sizeof(Hash));
+    if (!p) return -1;
+
+    commit->parents = p;
+    commit->parents[commit->parent_count++] = parent;
+    return 0;
+}
+
 int commit_parse(const uint8_t *data, size_t size, Commit *commit) {
     char *str = (char *)malloc(size + 1);
     if (!str) return -1;
@@ -81,55 +97,54 @@ int commit_parse(const uint8_t *data, size_t size, Commit *commit) {
 
     char *line = str;
     char *next;
-    int in_message = 0;
     char *message_start = NULL;
+    int rc = -1;
 
     while (line && *line) {
         next = strchr(line, '\n');
         if (next) *next++ = 0;
 
-        if (in_message) {
-            /* 已经在消息部分 */
-            if (!message_start) message_start = line;
-        } else if (strncmp(line, "tree ", 5) == 0) {
-            hex_to_hash(line + 5, &commit->tree);
+        if (strncmp(line, "tree ", 5) == 0) {
+            if (hex_to_hash(line + 5, &commit->tree) != 0) goto cleanup;
         } else if (strncmp(line, "parent ", 7) == 0) {
-            if (commit->parent_count < MAX_PARENTS) {
-                hex_to_hash(line + 7, &commit->parents[commit->parent_count]);
-                commit->parent_count++;
-            }
+            if (commit_add_parent(commit, line + 7) != 0) goto cleanup;
         } else if (strncmp(line, "author ", 7) == 0) {
-            parse_signature(line + 7, &commit->author);
+            if (parse_signature(line + 7, &commit->author) != 0) goto cleanup;
         } else if (strncmp(line, "committer ", 10) == 0) {
-            parse_signature(line + 10, &commit->committer);
-        } else if (strlen(line) == 0) {
-            /* 空行，开始消息 */
-            in_message = 1;
-            if (next) message_start = next;
+            if (parse_signature(line + 10, &commit->committer) != 0) goto cleanup;
+        } else if (line[0] == 0) {
+            message_start = next;
             break;
         }
 
         line = next;
     }
 
-    /* 提取消息 */
     if (message_start) {
-        size_t msg_len = size - (message_start - str);
+        size_t msg_len = size - (size_t)(message_start - str);
         commit->message = (char *)malloc(msg_len + 1);
-        if (commit->message) {
-            memcpy(commit->message, message_start, msg_len);
-            commit->message[msg_len] = 0;
-        }
+        if (!commit->message) goto cleanup;
+        memcpy(commit->message, message_start, msg_len);
+        commit->message[msg_len] = 0;
     }
 
+    rc = 0;
+
+cleanup:
     free(str);
-    return 0;
+    if (rc != 0) commit_free(commit);
+    return rc;
 }
 
 int commit_serialize(const Commit *commit, uint8_t **data, size_t *size) {
-    /* 动态计算所需大小 */
+    /* parent 数量没有人为上限，因此按真实头部规模分配。 */
     size_t msg_len = commit->message ? strlen(commit->message) : 0;
-    size_t buf_size = 4096 + msg_len;  /* 头部预留 4096（足以容纳极端长的作者信息）+ 消息 */
+    const char *an = commit->author.name ? commit->author.name : "Unknown";
+    const char *ae = commit->author.email ? commit->author.email : "unknown@example.com";
+    const char *cn = commit->committer.name ? commit->committer.name : "Unknown";
+    const char *ce = commit->committer.email ? commit->committer.email : "unknown@example.com";
+    size_t buf_size = 512 + msg_len + (size_t)commit->parent_count * 64
+                    + strlen(an) + strlen(ae) + strlen(cn) + strlen(ce);
     char *buf = (char *)malloc(buf_size);
     if (!buf) return -1;
 
@@ -147,15 +162,13 @@ int commit_serialize(const Commit *commit, uint8_t **data, size_t *size) {
 
     pos += snprintf(buf + pos, buf_size - pos, 
                     "author %s <%s> %lu %s\n",
-                    commit->author.name ? commit->author.name : "Unknown",
-                    commit->author.email ? commit->author.email : "unknown@example.com",
+                    an, ae,
                     (unsigned long)commit->author.timestamp,
                     commit->author.tz[0] ? commit->author.tz : "+0000");
 
     pos += snprintf(buf + pos, buf_size - pos, 
                     "committer %s <%s> %lu %s\n",
-                    commit->committer.name ? commit->committer.name : "Unknown",
-                    commit->committer.email ? commit->committer.email : "unknown@example.com",
+                    cn, ce,
                     (unsigned long)commit->committer.timestamp,
                     commit->committer.tz[0] ? commit->committer.tz : "+0000");
 
@@ -206,8 +219,10 @@ int commit_create(ObjectStore *store, const Hash *tree, const Hash *parent,
 
     commit.tree = *tree;
     
+    Hash parent_storage[1];
     if (parent) {
-        commit.parents[0] = *parent;
+        parent_storage[0] = *parent;
+        commit.parents = parent_storage;
         commit.parent_count = 1;
     }
 
@@ -240,8 +255,8 @@ int commit_create_merge(ObjectStore *store, const Hash *tree,
     memset(&commit, 0, sizeof(commit));
 
     commit.tree = *tree;
-    commit.parents[0] = *parent1;
-    commit.parents[1] = *parent2;
+    Hash parent_storage[2] = { *parent1, *parent2 };
+    commit.parents = parent_storage;
     commit.parent_count = 2;
 
     commit.author.name = "mgit user";
