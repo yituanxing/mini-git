@@ -43,6 +43,31 @@ static int is_url(const char *s) {
     return strncmp(s, "http://", 7) == 0 || strncmp(s, "https://", 8) == 0;
 }
 
+/* Build an absolute path without leaking platform APIs into Git core code. */
+static char *absolute_path_dup(const char *path) {
+#ifdef _WIN32
+    return _fullpath(NULL, path, 0);
+#else
+    if (!path) return NULL;
+
+    if (path[0] == '/') {
+        size_t n = strlen(path) + 1;
+        char *out = (char *)malloc(n);
+        if (out) memcpy(out, path, n);
+        return out;
+    }
+
+    char cwd[4096];
+    if (!getcwd(cwd, sizeof(cwd))) return NULL;
+
+    size_t n = strlen(cwd) + 1 + strlen(path) + 1;
+    char *out = (char *)malloc(n);
+    if (!out) return NULL;
+    snprintf(out, n, "%s/%s", cwd, path);
+    return out;
+#endif
+}
+
 /* 创建 .git 目录结构（同 init） */
 static int create_git_dir(const char *git_dir) {
     char path[1024];
@@ -450,7 +475,7 @@ static int clone_run(int argc, char **argv) {
     ref_manager_close(dst_refs);
 
     /* 5. 配置 remote origin（存绝对路径，避免相对路径失效） */
-    char *abs_src = _fullpath(NULL, src_path, 0);
+    char *abs_src = absolute_path_dup(src_path);
     if (abs_src) {
         remote_config_set(dst_git, "origin", abs_src);
         free(abs_src);
