@@ -2,6 +2,7 @@
 #include "../core/object.h"
 #include "../core/tree.h"
 #include "../core/commit.h"
+#include "../core/graph.h"
 #include "../core/ref.h"
 #include "../core/index.h"
 #include "../base/hash.h"
@@ -98,28 +99,6 @@ static int rebase_in_progress(void) {
     return file_exists(REBASE_TODO) || file_exists(REBASE_CURRENT);
 }
 
-/* ---- 祖先判断 ---- */
-
-/* target 是否在 start 的历史中 */
-static int is_ancestor(ObjectStore *store, const Hash *target, const Hash *start) {
-    if (hash_equal(target, start)) return 1;
-    Hash queue[1000];
-    int head = 0, tail = 0;
-    queue[tail++] = *start;
-    while (head < tail && head < 999) {
-        Hash cur = queue[head++];
-        Commit c;
-        memset(&c, 0, sizeof(c));
-        if (commit_read(store, &cur, &c) != 0) continue;
-        for (int i = 0; i < c.parent_count; i++) {
-            if (hash_equal(target, &c.parents[i])) { commit_free(&c); return 1; }
-            if (tail < 1000) queue[tail++] = c.parents[i];
-        }
-        commit_free(&c);
-    }
-    return 0;
-}
-
 /*
  * 收集 HEAD 有而 upstream 没有的提交（BFS）
  * 返回数量；结果按"新→旧"顺序，调用者需反转
@@ -145,7 +124,7 @@ static int collect_local_commits(ObjectStore *store, const Hash *head,
         if (vcount < 1000) visited[vcount++] = cur;
 
         /* 在 upstream 历史中 → 不收集，且不再向下遍历 */
-        if (is_ancestor(store, &cur, upstream)) continue;
+        if (graph_is_ancestor(store, &cur, upstream)) continue;
 
         if (count < max) out[count++] = cur;
 
@@ -413,7 +392,7 @@ static int rebase_run(int argc, char **argv) {
 
     /* 已经是最新（HEAD 等于 upstream，或 upstream 已是 HEAD 的祖先）→ 无需变基 */
     if (hash_equal(&head_hash, &upstream) ||
-        is_ancestor(store, &upstream, &head_hash)) {
+        graph_is_ancestor(store, &upstream, &head_hash)) {
         printf("Current branch is up to date.\n");
         index_close(idx); ref_manager_close(refs); object_store_close(store);
         return 0;
