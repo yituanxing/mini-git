@@ -8,7 +8,7 @@
 1. [Git 核心思想](#一git-核心思想) —— 理解本项目前必须理解的东西
 2. [代码架构](#二代码架构) —— 目录、模块、分层、关键数据结构
 3. [命令清单](#三命令清单与参数支持) —— 每个命令支持什么、与真实 git 的差异
-4. [维护原则](#四扩展指南想加新功能看这里) —— 如何在不教错 Git 的前提下改代码
+4. [维护原则](#四维护原则) —— 如何在不教错 Git 的前提下改代码
 
 ---
 
@@ -34,7 +34,7 @@ Git 的本质是一个**以 SHA-1 哈希为键的对象数据库**。任何内�
 └── pack/                # 打包后的对象（.pack + .idx）
 ```
 
-松散对象的磁盘格式：`"<类型> <长度>\0" + zlib(原始内容)`。
+松散对象先构造规范内容 `"<类型> <长度>\0" + 原始内容`，再**整体 zlib 压缩**后写入磁盘：`zlib(header + content)`。
 
 ### 1.2 四种对象类型
 
@@ -131,7 +131,7 @@ src/
 | `ObjectStore` | core/object.h | 对象库句柄，`object_store_open(".git")` |
 | `Index/IndexEntry` | core/index.h | 暂存区，条目含路径/哈希/模式 |
 | `Tree/TreeEntry` | core/tree.h | 目录快照，条目含模式/名字/哈希/类型 |
-| `Commit` | core/commit.h | 双亲数组 + tree 哈希 + 消息 |
+| `Commit` | core/commit.h | 动态 parent 数组 + tree 哈希 + 消息；普通提交/merge/octopus 都使用同一模型 |
 | `RefManager` | core/ref.h | 引用的读写门面 |
 | `RefAd` | core/transport.h | 服务器引用广告（哈希+名字的数组） |
 | `PushUpdate` | core/transport.h | 一条推送指令（引用名 + 新旧哈希） |
@@ -237,7 +237,7 @@ make test
 | `cherry-pick` | `mgit cherry-pick <提交>` | 一次一个提交；无 sequencer/`--continue`；merge commit 因未实现 `-m` mainline 而明确拒绝 |
 | `rebase` | `mgit rebase <分支>` / `--continue` / `--abort` | 教学版只重放**线性本地历史**；detached HEAD 和含 merge commit 的本地历史明确拒绝；无 `-i`/`--onto`/`--rebase-merges` |
 | `pull` | `mgit pull [<remote>] [<分支>]` | 真实 Git 是 fetch + integrate；mgit 固定选择 merge 作为 integrate 策略 |
-| `fetch` | `mgit fetch [<remote>]` | 单轮协商（一次 have 往返），不做多轮收敛 |
+| `fetch` | `mgit fetch [<remote>]` | 单轮协商（一次 have 往返），不做多轮收敛；`FETCH_HEAD` 教学简化为记录本次广告里的第一个分支 |
 | `push` | `mgit push [-f|--force] [<remote>] [<分支>]` | **一次一个分支**；无 `-u`、无标签推送；默认拒绝非快进 |
 | `clone` | `mgit clone <路径或URL> [目录]` | 无 `--depth`/`--branch`/`--bare` |
 | `remote` | `mgit remote [-v]` / `add <名> <地址>` / `remove <名>` | **没有 `set-url`**；地址可以是本地路径或 http(s) URL |
@@ -326,4 +326,5 @@ make test
 3. 涉及存储格式的：把产物丢给真实 `git fsck` / `git log` 验证；
 4. 涉及网络的：本地 `git_http_server.py` 起真服务器端到端跑一遍；
 5. 边界场景重点看：**超过固定容量、空输入、重复执行**。
-   commit DAG 的共享祖先遍历已经改为动态结构，新增代码不要重新引入静默固定上限。
+   commit DAG 的 ancestor/merge-base、Commit parent、local reachable-copy 都不再静默截断；
+   仍保留的有界缓冲必须是格式上限、资源保护，或在超限时明确报错。
