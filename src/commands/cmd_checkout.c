@@ -13,13 +13,14 @@
 #include <string.h>
 
 /*
- * mgit checkout <branch> [-b <new-branch>]
- * 
- * 切换分支，或创建并切换到新分支
- * 
- * 支持:
- * - mgit checkout <branch>     切换到已有分支
- * - mgit checkout -b <name>    创建新分支并切换
+ * mgit checkout <branch|commit>
+ * mgit checkout -b <new-branch>
+ *
+ * 切换分支、检出某个 commit（detached HEAD），或创建并切换到新分支。
+ *
+ * HEAD 的两个关键状态：
+ * - 分支状态：HEAD = "ref: refs/heads/master"
+ * - detached：HEAD 直接保存 commit hash
  * 
  * 切换分支时会：
  * 1. 检查未提交的修改是否会被覆盖（安全检查）
@@ -29,9 +30,9 @@
  */
 
 static void checkout_help(void) {
-    printf("usage: mgit checkout <branch>\n");
+    printf("usage: mgit checkout <branch-or-commit>\n");
     printf("       mgit checkout -b <new-branch>\n\n");
-    printf("Switch branches or create a new branch.\n\n");
+    printf("Switch branches, detach at a commit, or create a new branch.\n\n");
     printf("Options:\n");
     printf("    -b <name>    Create and switch to new branch\n");
 }
@@ -178,6 +179,27 @@ static int sync_worktree(ObjectStore *store, Index *idx, const Hash *target_comm
     return 0;
 }
 
+/* 解析用于 detached HEAD 的 commit-ish：引用名或 4..40 位 commit 前缀。 */
+static int resolve_commitish(ObjectStore *store, RefManager *refs,
+                             const char *name, Hash *out) {
+    if (ref_resolve_quiet(refs, name, out) == 0) {
+        Object obj;
+        memset(&obj, 0, sizeof(obj));
+        if (object_store_read(store, out, &obj) == 0) {
+            int ok = (obj.type == OBJ_COMMIT);
+            object_free(&obj);
+            if (ok) return 0;
+        }
+    }
+
+    size_t len = strlen(name);
+    if (len >= 4 && len <= 40 &&
+        object_find_by_prefix(store, name, OBJ_COMMIT, out) == 0) {
+        return 0;
+    }
+    return -1;
+}
+
 static int checkout_run(int argc, char **argv) {
     if (argc < 2) {
         mgit_error("no branch specified");
@@ -270,21 +292,37 @@ static int checkout_run(int argc, char **argv) {
         return 0;
     }
 
-    /* 检查分支是否存在 */
+    /*
+     * 优先按本地分支解析；如果不是分支，再按 commit-ish 解析。
+     * 后一种情况进入 detached HEAD。
+     */
     Hash target_hash;
-    if (ref_resolve(refs, ref_path, &target_hash) != 0) {
-        mgit_error("branch '%s' not found", branch_name);
+    int target_is_branch =
+        (ref_resolve_quiet(refs, ref_path, &target_hash) == 0);
+
+    ObjectStore *store = object_store_open(".git");
+    if (!store) {
+        mgit_error("cannot open object store");
         ref_manager_close(refs);
         return -1;
     }
 
-    /* 检查是否已经在该分支上 */
+    if (!target_is_branch &&
+        resolve_commitish(store, refs, branch_name, &target_hash) != 0) {
+        mgit_error("branch or commit '%s' not found", branch_name);
+        object_store_close(store);
+        ref_manager_close(refs);
+        return -1;
+    }
+
+    /* 记录切换前的位置；分支切换到自己时直接返回。 */
     char current[256];
     char from_branch[256];
     snprintf(from_branch, sizeof(from_branch), "HEAD");
     if (ref_get_head_branch(refs, current, sizeof(current)) == 0) {
-        if (strcmp(current, ref_path) == 0) {
+        if (target_is_branch && strcmp(current, ref_path) == 0) {
             printf("Already on '%s'\n", branch_name);
+            object_store_close(store);
             ref_manager_close(refs);
             return 0;
         }
@@ -293,7 +331,6 @@ static int checkout_run(int argc, char **argv) {
         }
     }
 
-    /* 记录旧 HEAD（供 reflog） */
     Hash old_head_hash;
     char old_hex[HASH_HEX_SIZE];
     memset(old_hex, '0', 40);
@@ -302,14 +339,7 @@ static int checkout_run(int argc, char **argv) {
         hash_to_hex(&old_head_hash, old_hex);
     }
 
-    /* 打开对象存储和 Index，同步工作区 */
-    ObjectStore *store = object_store_open(".git");
-    if (!store) {
-        mgit_error("cannot open object store");
-        ref_manager_close(refs);
-        return -1;
-    }
-
+    /* 两种 checkout 都用同一套安全检查并同步工作区 + Index。 */
     Index *idx = index_open(".git");
     if (!idx) {
         mgit_error("cannot open index");
@@ -319,7 +349,6 @@ static int checkout_run(int argc, char **argv) {
     }
 
     if (sync_worktree(store, idx, &target_hash) != 0) {
-        /* 安全检查失败或同步失败：不切换 HEAD */
         index_close(idx);
         object_store_close(store);
         ref_manager_close(refs);
@@ -329,22 +358,29 @@ static int checkout_run(int argc, char **argv) {
     index_close(idx);
     object_store_close(store);
 
-    /* 切换 HEAD */
-    if (ref_set_head(refs, branch_name) != 0) {
-        mgit_error("failed to switch to branch '%s'", branch_name);
-        ref_manager_close(refs);
-        return -1;
-    }
-
     char hex[HASH_HEX_SIZE];
     hash_to_hex(&target_hash, hex);
-    printf("Switched to branch '%s' (%s)\n", branch_name, hex);
 
-    /* 记录 reflog */
+    if (target_is_branch) {
+        if (ref_set_head(refs, branch_name) != 0) {
+            mgit_error("failed to switch to branch '%s'", branch_name);
+            ref_manager_close(refs);
+            return -1;
+        }
+        printf("Switched to branch '%s' (%s)\n", branch_name, hex);
+    } else {
+        if (ref_set_head_detached(refs, &target_hash) != 0) {
+            mgit_error("failed to detach HEAD at %s", branch_name);
+            ref_manager_close(refs);
+            return -1;
+        }
+        printf("HEAD is now at %.7s (detached)\n", hex);
+    }
+
     {
         char action[512];
         snprintf(action, sizeof(action), "checkout: moving from %s to %s",
-                 from_branch, branch_name);
+                 from_branch, target_is_branch ? branch_name : hex);
         reflog_append(old_hex, hex, action);
     }
 
