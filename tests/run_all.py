@@ -220,6 +220,69 @@ def test_diff() -> None:
               "default diff reports tracked Working Tree deletion")
 
 
+
+def test_reset() -> None:
+    print("\n== reset ==")
+    with tempdir("reset") as d:
+        def history(name: str):
+            repo = d / name
+            repo.mkdir()
+            mgit(repo, "init")
+            write(repo / "a.txt", b"v1\n")
+            mgit(repo, "add", "a.txt")
+            mgit(repo, "commit", "-m", "c1")
+            c1 = out(git(repo, "rev-parse", "HEAD")).strip()
+
+            write(repo / "a.txt", b"v2\n")
+            mgit(repo, "add", "a.txt")
+            mgit(repo, "commit", "-m", "c2")
+            c2 = out(git(repo, "rev-parse", "HEAD")).strip()
+            return repo, c1, c2
+
+        # --soft: only HEAD moves. Index and Working Tree stay at c2.
+        repo, c1, c2 = history("soft")
+        mgit(repo, "reset", "--soft", c1)
+        check(out(git(repo, "rev-parse", "HEAD")).strip() == c1,
+              "reset --soft moves HEAD")
+        check((repo / "a.txt").read_text(encoding="utf-8") == "v2\n",
+              "reset --soft keeps Working Tree")
+        check(run([GIT, "diff", "--quiet"], cwd=repo).returncode == 0,
+              "reset --soft keeps Index equal to Working Tree")
+        check(run([GIT, "diff", "--cached", "--quiet"], cwd=repo).returncode != 0,
+              "reset --soft keeps old Index, now different from HEAD")
+
+        # --mixed: HEAD + Index move, Working Tree stays. This is the default.
+        repo, c1, _ = history("mixed")
+        mgit(repo, "reset", "--mixed", c1)
+        check(out(git(repo, "rev-parse", "HEAD")).strip() == c1,
+              "reset --mixed moves HEAD")
+        check((repo / "a.txt").read_text(encoding="utf-8") == "v2\n",
+              "reset --mixed keeps Working Tree")
+        check(run([GIT, "diff", "--cached", "--quiet"], cwd=repo).returncode == 0,
+              "reset --mixed resets Index to HEAD")
+        check(run([GIT, "diff", "--quiet"], cwd=repo).returncode != 0,
+              "reset --mixed leaves Working Tree different from Index")
+
+        repo, c1, _ = history("default")
+        mgit(repo, "reset", c1)
+        check(run([GIT, "diff", "--cached", "--quiet"], cwd=repo).returncode == 0 and
+              run([GIT, "diff", "--quiet"], cwd=repo).returncode != 0,
+              "plain reset defaults to --mixed")
+
+        # --hard: all three snapshots move together.
+        repo, c1, c2 = history("hard")
+        mgit(repo, "reset", "--hard", c1)
+        check(out(git(repo, "rev-parse", "HEAD")).strip() == c1,
+              "reset --hard moves HEAD")
+        check((repo / "a.txt").read_text(encoding="utf-8") == "v1\n",
+              "reset --hard restores Working Tree")
+        check(run([GIT, "diff", "--quiet"], cwd=repo).returncode == 0 and
+              run([GIT, "diff", "--cached", "--quiet"], cwd=repo).returncode == 0,
+              "reset --hard makes HEAD Index and Working Tree agree")
+        check(c2[:7] in text(mgit(repo, "reflog")),
+              "reflog keeps the commit that reset moved away from")
+
+
 def test_dogfood() -> None:
     print("\n== dogfood ==")
     with tempdir("dogfood") as d:
@@ -278,6 +341,7 @@ TESTS = {
     "basic": test_basic,
     "compat": test_compat,
     "diff": test_diff,
+    "reset": test_reset,
     "dogfood": test_dogfood,
     "network": test_network,
 }
