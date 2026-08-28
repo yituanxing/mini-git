@@ -453,6 +453,12 @@ static int clone_run(int argc, char **argv) {
 
     char branches[64][256];
     int count = ref_list_branches(src_refs, branches, 64);
+    if (count == -2) {
+        mgit_error("source has too many branches for local clone (limit 64)");
+        ref_manager_close(src_refs);
+        ref_manager_close(dst_refs);
+        return -1;
+    }
     for (int i = 0; i < count; i++) {
         Hash hash;
         if (ref_resolve_quiet(src_refs, branches[i], &hash) == 0) {
