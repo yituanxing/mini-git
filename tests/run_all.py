@@ -570,6 +570,49 @@ def test_merge() -> None:
               "mgit merge explicitly rejects detached HEAD")
 
 
+
+def test_integrity() -> None:
+    print("\n== integrity ==")
+    with tempdir("integrity") as d:
+        mgit(d, "init")
+
+        # A loose object's pathname OID must match its canonical content hash.
+        write(d / "good.txt", b"good\n")
+        good = out(mgit(d, "hash-object", "-w", "good.txt")).strip()
+        write(d / "other.txt", b"other\n")
+        wrong = out(git(d, "hash-object", "other.txt")).strip()
+
+        src = d / ".git" / "objects" / good[:2] / good[2:]
+        dst = d / ".git" / "objects" / wrong[:2] / wrong[2:]
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, dst)
+
+        bad = run([MGIT, "cat-file", "-t", wrong], cwd=d)
+        check(bad.returncode != 0 and "hash mismatch" in text(bad).lower(),
+              "object reader rejects content stored under the wrong OID")
+
+        # The Index checksum protects the complete serialized staging area.
+        write(d / "tracked.txt", b"tracked\n")
+        mgit(d, "add", "tracked.txt")
+        index_path = d / ".git" / "index"
+        original = bytearray(index_path.read_bytes())
+        check(len(original) > 32, "test Index has header entries and checksum")
+
+        tampered = bytearray(original)
+        tampered[12] ^= 0x01
+        index_path.write_bytes(tampered)
+        bad_index = run([MGIT, "status"], cwd=d)
+        check(bad_index.returncode != 0 and "checksum" in text(bad_index).lower(),
+              "Index reader rejects checksum mismatch")
+        check(index_path.read_bytes() == tampered,
+              "failed Index read does not silently rewrite it as empty")
+
+        index_path.write_bytes(original[:-7])
+        truncated = run([MGIT, "status"], cwd=d)
+        check(truncated.returncode != 0,
+              "Index reader rejects truncated file")
+
+
 def test_mainline() -> None:
     print("\n== mainline ==")
     with tempdir("mainline") as d:
@@ -660,6 +703,7 @@ TESTS = {
     "diff": test_diff,
     "reset": test_reset,
     "dogfood": test_dogfood,
+    "integrity": test_integrity,
     "mainline": test_mainline,
     "merge": test_merge,
     "stash": test_stash,
