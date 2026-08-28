@@ -417,6 +417,53 @@ def test_dogfood() -> None:
               "real Git sees self-hosted tree as clean")
 
 
+
+def test_mainline() -> None:
+    print("\n== mainline ==")
+    with tempdir("mainline") as d:
+        init_git_repo(d)
+        write(d / "base.txt", b"base\n")
+        git(d, "add", ".")
+        git_commit(d, "base")
+
+        git(d, "branch", "feature")
+        git(d, "checkout", "-q", "feature")
+        write(d / "feature.txt", b"feature\n")
+        git(d, "add", ".")
+        git_commit(d, "feature")
+
+        git(d, "checkout", "-q", "master")
+        write(d / "master.txt", b"master\n")
+        git(d, "add", ".")
+        git_commit(d, "master")
+        git(d, "-c", "user.name=Tester", "-c", "user.email=t@t.com",
+            "merge", "--no-ff", "feature", "-m", "merge")
+        merge_commit = out(git(d, "rev-parse", "HEAD")).strip()
+        parent1 = out(git(d, "rev-parse", "HEAD^1")).strip()
+
+        # Put HEAD before the merge so cherry-pick/revert have a meaningful target.
+        git(d, "reset", "--hard", parent1)
+        before = out(git(d, "rev-parse", "HEAD")).strip()
+
+        real_cp = run([GIT, "cherry-pick", merge_commit], cwd=d)
+        check(real_cp.returncode != 0,
+              "real Git requires a mainline to cherry-pick a merge commit")
+        cp = run([MGIT, "cherry-pick", merge_commit], cwd=d)
+        check(cp.returncode != 0 and "mainline" in text(cp).lower(),
+              "mgit refuses merge cherry-pick instead of guessing parent 1")
+        check(out(git(d, "rev-parse", "HEAD")).strip() == before,
+              "refused merge cherry-pick leaves HEAD unchanged")
+
+        real_revert = run([GIT, "revert", "--no-edit", merge_commit], cwd=d)
+        check(real_revert.returncode != 0,
+              "real Git requires a mainline to revert a merge commit")
+        rv = run([MGIT, "revert", merge_commit], cwd=d)
+        check(rv.returncode != 0 and "mainline" in text(rv).lower(),
+              "mgit refuses merge revert instead of guessing parent 1")
+        check(out(git(d, "rev-parse", "HEAD")).strip() == before,
+              "refused merge revert leaves HEAD unchanged")
+
+
 def test_network() -> None:
     print("\n== network ==")
     with tempdir("network") as d:
@@ -461,6 +508,7 @@ TESTS = {
     "diff": test_diff,
     "reset": test_reset,
     "dogfood": test_dogfood,
+    "mainline": test_mainline,
     "network": test_network,
 }
 
