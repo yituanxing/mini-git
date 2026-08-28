@@ -5,6 +5,7 @@
 #include "../core/tree.h"
 #include "../core/index.h"
 #include "../base/hash.h"
+#include "../base/file.h"
 #include "../base/error.h"
 
 #include <stdio.h>
@@ -135,6 +136,14 @@ static int reset_run(int argc, char **argv) {
         return -1;
     }
 
+    int merge_in_progress = file_exists(".git/MERGE_HEAD");
+    if (merge_in_progress && mode == RESET_SOFT) {
+        mgit_error("cannot do a soft reset in the middle of a merge");
+        mgit_error("use --mixed/--hard, or finish the merge with commit");
+        ref_manager_close(refs);
+        return -1;
+    }
+
     /* 解析目标 commit（支持短哈希、完整哈希、引用名） */
     ObjectStore *store = object_store_open(".git");
     if (!store) {
@@ -218,6 +227,17 @@ static int reset_run(int argc, char **argv) {
         mgit_error("failed to update branch");
         ref_manager_close(refs);
         return -1;
+    }
+
+    /*
+     * Like real Git, a successful mixed/hard reset ends an in-progress merge.
+     * --soft is rejected above because it would move HEAD while preserving
+     * merge state and the unresolved Index.
+     */
+    if (merge_in_progress && mode != RESET_SOFT) {
+        if (file_delete(".git/MERGE_HEAD") != 0) {
+            mgit_warning("reset succeeded but failed to remove MERGE_HEAD");
+        }
     }
 
     char target_hex[HASH_HEX_SIZE];
