@@ -1,41 +1,87 @@
-# mgit — 从零用 C 语言实现的迷你 Git
+# mgit — 从零用 C 语言实现的教学 Git
 
-**mgit (mini-git)**：一个用 C 语言从零实现的 Git，目标是与真实 Git **双向兼容**——它生成的仓库能通过 `git fsck` 校验，它也能克隆、拉取、推送真实 Git 服务器（含 Gitee）上的仓库。
+**mgit (mini-git)** 是一个可运行、可调试、可与真实 Git 互操作的 Git 教学实现。
 
-> mgit: a Git reimplementation in plain C, bidirectionally compatible with real Git.
+它的目标不是覆盖 Git 的所有功能，而是把常见 Git 知识真正写成代码：
+Working Tree / Index / HEAD、对象与引用、branch、merge/rebase、reset/revert、
+stash/reflog，以及 clone/fetch/pull/push 背后的 Smart HTTP 与 pack。
+
+保留下来的能力尽量让真实 Git 来验收：mgit 生成的仓库可以用
+`git fsck` / `git cat-file` 检查，网络测试直接对接真实
+`git http-backend`。
 
 ## 为什么造这个轮子 / Why
 
-为了真正弄懂 Git 的底层原理：内容寻址的对象库、四种对象、暂存区、三路合并、packfile、Smart HTTP 协议……最好的学习方式就是亲手写一个。完整的设计思路、架构图和扩展指南见 **[DESIGN.md](DESIGN.md)**。
+很多 Git 概念只背结论很容易混淆。例如：
+
+- `git diff` 与 `git diff --cached` 到底在比较哪两层？
+- `reset --soft / --mixed / --hard` 分别移动 HEAD、Index、Working Tree 中的什么？
+- branch 与 HEAD 是什么关系？detached HEAD 为什么不会移动分支？
+- fast-forward merge 为什么没有新 commit，而普通 merge 为什么有两个 parent？
+- rebase 为什么会产生新的 commit hash？
+- fetch 与 pull 到底差在哪一步？
+
+mgit 希望这些问题能直接通过源码和实验看懂，而不是只靠背答案。
 
 ## 功能一览 / Features
 
-- **28 个命令**：init / add / commit / status / log / diff / branch / checkout / merge / rebase / cherry-pick / stash / reflog / tag / reset / revert / gc …
-- **网络协作**：clone / fetch / pull / push，支持本地路径与 Smart HTTP（http/https，Basic Auth）
-- **兼容性**：松散对象、packfile、index、ref 格式与真实 Git 互通，`git fsck` 全绿
-- **测试**：17 个测试套件、400+ 断言，含对抗性用例
+- **28 个命令**：init / add / commit / status / log / diff / branch / checkout /
+  merge / rebase / cherry-pick / stash / reflog / tag / reset / revert / gc …
+- **真实 Git 数据模型**：blob / tree / commit、Index、refs、loose objects、packfile
+- **网络协作**：clone / fetch / pull / push，使用 Git Smart HTTP
+- **双平台**：
+  - Windows：MinGW + WinHTTP
+  - Linux：GCC + libcurl
+- **互操作测试**：同一份 Python 测试在 Windows/Linux 运行，并用真实 Git 作为 oracle
+- **Dogfood**：mgit 可以管理一份自己的源码快照，真实 Git 能继续读取和校验
 
-## 构建 / Build（Windows + MinGW）
+## 构建 / Build
 
+### Windows / MinGW
+
+```text
+mingw32-make
+mingw32-make test
 ```
-mingw32-make        # 编译，产出 build/mgit.exe
-mingw32-make test   # 跑全部测试
+
+输出：`build/mgit.exe`
+
+### Linux
+
+```text
+make
+make test
 ```
+
+输出：`build/mgit`
+
+`make test` 在两个平台都运行 `tests/run_all.py`。迁移期间 Windows
+仍保留旧 PowerShell 回归套件作为额外保险。
 
 ## 快速体验 / Quick Start
 
-```
+```text
 mgit init
 echo hello > a.txt
 mgit add a.txt
-mgit commit -m "first commit / 首次提交"
+mgit commit -m "first commit"
+mgit status
 mgit log
+```
+
+想理解底层对象，可以继续：
+
+```text
+mgit hash-object -w a.txt
+mgit cat-file -t <hash>
+mgit write-tree
+mgit commit-tree <tree> -m "manual commit"
 ```
 
 ## 文档 / Documentation
 
-- [DESIGN.md](DESIGN.md)：核心思想、代码架构、命令清单（含与真实 git 的参数差异）、扩展指南
+- [DESIGN.md](DESIGN.md)：Git 核心模型、代码架构、命令语义与 mgit 的刻意简化
 
 ---
 
-*本仓库由 mgit 自己管理（自举）——提交历史就是它最好的广告。*
+*本仓库持续用 mgit 自己做 dogfood；真实 Git 负责交叉验收。*
