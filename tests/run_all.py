@@ -356,6 +356,100 @@ def test_diff() -> None:
 
 
 
+
+def test_rebase() -> None:
+    print("\n== rebase ==")
+    with tempdir("rebase") as root:
+        # Linear rebase: replay local commit on a new base and therefore
+        # produce a new commit id with the upstream tip as parent.
+        repo = root / "linear"
+        repo.mkdir()
+        mgit(repo, "init")
+        write(repo / "base.txt", b"base\n")
+        mgit(repo, "add", ".")
+        mgit(repo, "commit", "-m", "base")
+        mgit(repo, "branch", "feature")
+
+        mgit(repo, "checkout", "feature")
+        write(repo / "feature.txt", b"feature\n")
+        mgit(repo, "add", ".")
+        mgit(repo, "commit", "-m", "feature work")
+        old_feature = out(git(repo, "rev-parse", "HEAD")).strip()
+
+        mgit(repo, "checkout", "master")
+        write(repo / "master.txt", b"master\n")
+        mgit(repo, "add", ".")
+        mgit(repo, "commit", "-m", "master work")
+        new_base = out(git(repo, "rev-parse", "HEAD")).strip()
+
+        mgit(repo, "checkout", "feature")
+        mgit(repo, "rebase", "master")
+        new_feature = out(git(repo, "rev-parse", "HEAD")).strip()
+        check(new_feature != old_feature,
+              "rebase rewrites local commit identity")
+        check(out(git(repo, "rev-parse", "HEAD^")).strip() == new_base,
+              "rebased commit is replayed on top of new base")
+        check((repo / "feature.txt").read_text(encoding="utf-8") == "feature\n" and
+              (repo / "master.txt").read_text(encoding="utf-8") == "master\n",
+              "rebased tree contains upstream and replayed changes")
+        git(repo, "fsck", "--full")
+        check(True, "real Git accepts mgit rebase result")
+
+        # Rebase is a history rewrite, so this teaching implementation
+        # refuses dirty tracked state before moving the branch.
+        write(repo / "staged.txt", b"staged\n")
+        mgit(repo, "add", "staged.txt")
+        before = out(git(repo, "rev-parse", "HEAD")).strip()
+        refused = run([MGIT, "rebase", "master"], cwd=repo)
+        check(refused.returncode != 0 and "staged" in text(refused).lower(),
+              "rebase refuses staged local changes")
+        check(out(git(repo, "rev-parse", "HEAD")).strip() == before,
+              "refused dirty rebase leaves branch tip unchanged")
+        git(repo, "reset", "--hard", "HEAD")
+
+        # Detached HEAD is not a branch to rewrite.
+        mgit(repo, "checkout", new_base[:7])
+        refused = run([MGIT, "rebase", "master"], cwd=repo)
+        check(refused.returncode != 0 and "current branch" in text(refused).lower(),
+              "mgit rebase explicitly rejects detached HEAD")
+
+        # A local merge commit needs --rebase-merges semantics. mgit does
+        # not implement that complexity and must reject before changing refs.
+        merged = root / "merge-history"
+        init_git_repo(merged)
+        write(merged / "base.txt", b"base\n")
+        git(merged, "add", ".")
+        git_commit(merged, "base")
+        git(merged, "branch", "feature")
+        git(merged, "branch", "side")
+
+        write(merged / "master.txt", b"master\n")
+        git(merged, "add", ".")
+        git_commit(merged, "master")
+        master_tip = out(git(merged, "rev-parse", "HEAD")).strip()
+
+        git(merged, "checkout", "-q", "side")
+        write(merged / "side.txt", b"side\n")
+        git(merged, "add", ".")
+        git_commit(merged, "side")
+
+        git(merged, "checkout", "-q", "feature")
+        write(merged / "feature.txt", b"feature\n")
+        git(merged, "add", ".")
+        git_commit(merged, "feature")
+        git(merged, "-c", "user.name=Tester", "-c", "user.email=t@t.com",
+            "merge", "--no-ff", "side", "-m", "feature merge")
+        merge_tip = out(git(merged, "rev-parse", "HEAD")).strip()
+
+        refused = run([MGIT, "rebase", "master"], cwd=merged)
+        check(refused.returncode != 0 and "merge commits" in text(refused).lower(),
+              "rebase rejects local merge history instead of flattening it silently")
+        check(out(git(merged, "rev-parse", "HEAD")).strip() == merge_tip,
+              "rejected merge-history rebase leaves feature unchanged")
+        check(out(git(merged, "rev-parse", "master")).strip() == master_tip,
+              "rejected rebase leaves upstream unchanged")
+
+
 def test_reset() -> None:
     print("\n== reset ==")
     with tempdir("reset") as d:
@@ -701,6 +795,7 @@ TESTS = {
     "checkout": test_checkout,
     "commit": test_commit,
     "diff": test_diff,
+    "rebase": test_rebase,
     "reset": test_reset,
     "dogfood": test_dogfood,
     "integrity": test_integrity,
