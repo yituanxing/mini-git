@@ -54,25 +54,17 @@ Index *index_open(const char *git_dir) {
     }
     path_join(idx->path, strlen(git_dir) + 10, git_dir, "index");
 
-    idx->entries = NULL;
-    idx->count = 0;
-    idx->capacity = 0;
-    idx->dirty = 0;
-
-    /* 尝试读取已有 index，不存在则创建空的 */
-    if (file_exists(idx->path)) {
-        if (index_read(idx) != 0) {
-            /* 读取失败，使用空 index */
-            idx->count = 0;
-        }
+    /* 不存在的 Index 表示空暂存区；存在但损坏则必须报错。 */
+    if (file_exists(idx->path) && index_read(idx) != 0) {
+        free(idx->path);
+        free(idx);
+        return NULL;
     }
-
     return idx;
 }
 
 void index_close(Index *idx) {
     if (idx) {
-        /* 如果有未保存的修改，自动保存 */
         if (idx->dirty) {
             index_write(idx);
         }
@@ -85,116 +77,164 @@ void index_close(Index *idx) {
     }
 }
 
+static void free_entry_array(IndexEntry *entries, size_t count) {
+    if (!entries) return;
+    for (size_t i = 0; i < count; i++) free(entries[i].name);
+    free(entries);
+}
+
 /*
- * 读取 Index 文件
- * 
- * 格式：
- * - 12 字节头部: "DIRC" + version(4) + count(4)
- * - 每个条目: 32字节stat + 20字节hash + 2字节flags + name(填充到8字节对齐)
- * - 20 字节尾部校验和
+ * 读取 Git Index v2：
+ * - 12-byte DIRC header
+ * - variable entries
+ * - optional extensions (目前忽略内容，但包含在 checksum 中)
+ * - trailing 20-byte SHA-1 over everything before the checksum
  */
 int index_read(Index *idx) {
-    uint8_t *data;
-    size_t size;
+    uint8_t *data = NULL;
+    size_t size = 0;
+    if (file_read_all(idx->path, &data, &size) != 0) return -1;
 
-    if (file_read_all(idx->path, &data, &size) != 0) {
-        return -1;
-    }
-
-    /* 检查最小长度 */
-    if (size < 12) {
+    if (size < 12 + HASH_SIZE) {
         free(data);
         mgit_error("index file too short");
         return -1;
     }
 
-    /* 验证签名 */
+    size_t payload_end = size - HASH_SIZE;
+
+    /* 尾部 checksum 是整个 Index payload 的 SHA-1。 */
+    SHA1_CTX sha;
+    Hash actual;
+    sha1_init(&sha);
+    sha1_update(&sha, data, payload_end);
+    sha1_final(&sha, &actual);
+    if (memcmp(actual.bytes, data + payload_end, HASH_SIZE) != 0) {
+        free(data);
+        mgit_error("index checksum mismatch");
+        return -1;
+    }
+
     if (memcmp(data, INDEX_SIGNATURE, 4) != 0) {
         free(data);
         mgit_error("invalid index signature");
         return -1;
     }
 
-    /* 读取版本和条目数 */
     uint32_t version = read_u32(data + 4);
     uint32_t count = read_u32(data + 8);
-
-    if (version != 2) {
+    if (version != INDEX_VERSION) {
+        free(data);
         mgit_error("unsupported index version: %u", version);
-        free(data);
         return -1;
     }
 
-    /* 清除旧条目 */
-    for (size_t i = 0; i < idx->count; i++) {
-        free(idx->entries[i].name);
-    }
-    free(idx->entries);
-
-    /* 分配新条目 */
-    idx->capacity = count > 0 ? count : 8;
-    idx->entries = (IndexEntry *)calloc(idx->capacity, sizeof(IndexEntry));
-    idx->count = 0;
-
-    if (count > 0 && !idx->entries) {
-        free(data);
-        return -1;
+    IndexEntry *entries = NULL;
+    if (count > 0) {
+        entries = (IndexEntry *)calloc(count, sizeof(IndexEntry));
+        if (!entries) {
+            free(data);
+            return -1;
+        }
     }
 
-    /* 解析条目 */
+    size_t parsed = 0;
     size_t offset = 12;
+
     for (uint32_t i = 0; i < count; i++) {
         size_t entry_start = offset;
-        /* 每个条目最小长度: 32 + 20 + 2 + 1 = 55 字节 */
-        if (offset + 55 > size) {
+
+        /* v2 fixed entry fields are 62 bytes before the pathname. */
+        if (offset + 62 + 1 > payload_end) {
             mgit_error("index file truncated at entry %u", i);
-            break;
+            free_entry_array(entries, parsed);
+            free(data);
+            return -1;
         }
 
-        IndexEntry *entry = &idx->entries[idx->count];
-
-        /* 32 字节 stat 信息 */
-        entry->ctime_sec = read_u32(data + offset);      offset += 4;
+        IndexEntry *entry = &entries[parsed];
+        entry->ctime_sec = read_u32(data + offset); offset += 4;
         offset += 4;  /* ctime nanoseconds */
-        entry->mtime_sec = read_u32(data + offset);      offset += 4;
+        entry->mtime_sec = read_u32(data + offset); offset += 4;
         offset += 4;  /* mtime nanoseconds */
-        entry->dev = read_u32(data + offset);            offset += 4;
-        entry->ino = read_u32(data + offset);            offset += 4;
-        entry->mode = read_u32(data + offset);           offset += 4;
-        entry->uid = read_u32(data + offset);            offset += 4;
-        entry->gid = read_u32(data + offset);            offset += 4;
-        entry->size = read_u32(data + offset);           offset += 4;
+        entry->dev = read_u32(data + offset);       offset += 4;
+        entry->ino = read_u32(data + offset);       offset += 4;
+        entry->mode = read_u32(data + offset);      offset += 4;
+        entry->uid = read_u32(data + offset);       offset += 4;
+        entry->gid = read_u32(data + offset);       offset += 4;
+        entry->size = read_u32(data + offset);      offset += 4;
 
-        /* 20 字节 hash */
         memcpy(entry->hash.bytes, data + offset, HASH_SIZE);
         offset += HASH_SIZE;
 
-        /* 2 字节 flags */
-        uint16_t flags = read_u16(data + offset);        offset += 2;
-        uint16_t name_len = flags & 0x0FFF;
+        uint16_t flags = read_u16(data + offset);
+        offset += 2;
+        size_t name_len = (size_t)(flags & 0x0FFF);
 
-        /* 读取文件名 */
-        if (offset + name_len > size) {
-            mgit_error("index entry name truncated");
-            break;
+        /* 0xFFF means "pathname is at least this long": scan to NUL. */
+        if (name_len == 0x0FFF) {
+            const uint8_t *nul =
+                (const uint8_t *)memchr(data + offset, 0, payload_end - offset);
+            if (!nul) {
+                mgit_error("index entry name is not NUL-terminated");
+                free_entry_array(entries, parsed);
+                free(data);
+                return -1;
+            }
+            name_len = (size_t)(nul - (data + offset));
+        } else {
+            if (offset + name_len >= payload_end || data[offset + name_len] != 0) {
+                mgit_error("index entry name truncated or missing NUL");
+                free_entry_array(entries, parsed);
+                free(data);
+                return -1;
+            }
+        }
+
+        size_t padded_end = entry_start + entry_padded_size(name_len);
+        if (padded_end > payload_end) {
+            mgit_error("index entry padding truncated");
+            free_entry_array(entries, parsed);
+            free(data);
+            return -1;
+        }
+
+        /* Name terminator + alignment padding must be NUL bytes. */
+        for (size_t p = offset + name_len; p < padded_end; p++) {
+            if (data[p] != 0) {
+                mgit_error("invalid non-zero index entry padding");
+                free_entry_array(entries, parsed);
+                free(data);
+                return -1;
+            }
         }
 
         entry->name = (char *)malloc(name_len + 1);
         if (!entry->name) {
+            free_entry_array(entries, parsed);
             free(data);
             return -1;
         }
         memcpy(entry->name, data + offset, name_len);
         entry->name[name_len] = 0;
 
-        /* 跳到下一个条目（从条目起始 + 填充后大小） */
-        offset = entry_start + entry_padded_size(name_len);
-
-        idx->count++;
+        parsed++;
+        offset = padded_end;
     }
 
-    free(data);
+    /*
+     * Bytes between the last entry and checksum may be Git index extensions.
+     * mgit does not interpret them yet, but checksum validation covers them.
+     */
+    for (size_t i = 0; i < idx->count; i++) free(idx->entries[i].name);
+    free(idx->entries);
+
+    idx->entries = entries;
+    idx->count = parsed;
+    idx->capacity = count > 0 ? count : 0;
     idx->dirty = 0;
+
+    free(data);
     return 0;
 }
 
