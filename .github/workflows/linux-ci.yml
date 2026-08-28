@@ -1,0 +1,45 @@
+name: Linux CI
+
+on:
+  push:
+    branches:
+      - master
+      - port/linux-support
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: GCC build + smoke + dogfood
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential zlib1g-dev libcurl4-openssl-dev git python3
+
+      - name: Build mgit
+        run: |
+          gcc --version
+          make --version
+          make clean
+          make
+
+      - name: Run Linux smoke and dogfood suite
+        run: make test
+
+      - name: Upload mgit
+        uses: actions/upload-artifact@v4
+        with:
+          name: mgit-linux-x64
+          path: build/mgit
+          if-no-files-found: error
