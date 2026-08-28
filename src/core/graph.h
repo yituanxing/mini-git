@@ -15,4 +15,11 @@
 int graph_is_ancestor(ObjectStore *store, const Hash *ancestor,
                       const Hash *start);
 
+/*
+ * Find the nearest common ancestor using mgit's deliberately simple
+ * breadth-first merge-base rule. Return 0 on success, -1 if none is found.
+ */
+int graph_find_merge_base(ObjectStore *store, const Hash *ours,
+                          const Hash *theirs, Hash *base_out);
+
 #endif /* MGIT_GRAPH_H */
