@@ -204,6 +204,54 @@ def test_branch() -> None:
               "refused branch -d leaves the branch intact")
 
 
+
+def test_checkout() -> None:
+    print("\n== checkout ==")
+    with tempdir("checkout") as d:
+        mgit(d, "init")
+        write(d / "a.txt", b"v1\n")
+        mgit(d, "add", ".")
+        mgit(d, "commit", "-m", "c1")
+        c1 = out(git(d, "rev-parse", "HEAD")).strip()
+
+        write(d / "a.txt", b"v2\n")
+        mgit(d, "add", ".")
+        mgit(d, "commit", "-m", "c2")
+        c2 = out(git(d, "rev-parse", "HEAD")).strip()
+
+        # A commit-ish that is not a local branch detaches HEAD.
+        mgit(d, "checkout", c1[:7])
+        check(out(git(d, "rev-parse", "HEAD")).strip() == c1,
+              "checkout commit moves HEAD to that commit")
+        check(run([GIT, "symbolic-ref", "-q", "HEAD"], cwd=d).returncode != 0,
+              "checkout commit makes HEAD detached")
+        check(out(git(d, "rev-parse", "refs/heads/master")).strip() == c2,
+              "detached checkout does not move master")
+        check("detached HEAD" in text(mgit(d, "status")),
+              "mgit status explains detached HEAD")
+        check((d / "a.txt").read_text(encoding="utf-8") == "v1\n",
+              "detached checkout restores target worktree")
+
+        # Commits made while detached advance HEAD directly, not master.
+        write(d / "detached.txt", b"detached work\n")
+        mgit(d, "add", "detached.txt")
+        mgit(d, "commit", "-m", "detached commit")
+        detached_tip = out(git(d, "rev-parse", "HEAD")).strip()
+        check(detached_tip != c1 and
+              out(git(d, "rev-parse", "HEAD^")).strip() == c1,
+              "detached commit advances direct HEAD with the old commit as parent")
+        check(out(git(d, "rev-parse", "refs/heads/master")).strip() == c2,
+              "detached commit still leaves master unchanged")
+
+        mgit(d, "checkout", "master")
+        check(run([GIT, "symbolic-ref", "-q", "HEAD"], cwd=d).returncode == 0,
+              "checkout branch reattaches HEAD")
+        check(out(git(d, "rev-parse", "HEAD")).strip() == c2,
+              "reattaching returns to branch tip")
+        check(detached_tip[:7] in text(mgit(d, "reflog")),
+              "reflog keeps detached commit recoverable after leaving it")
+
+
 def test_commit() -> None:
     print("\n== commit ==")
     with tempdir("commit") as d:
@@ -408,6 +456,7 @@ TESTS = {
     "basic": test_basic,
     "compat": test_compat,
     "branch": test_branch,
+    "checkout": test_checkout,
     "commit": test_commit,
     "diff": test_diff,
     "reset": test_reset,
