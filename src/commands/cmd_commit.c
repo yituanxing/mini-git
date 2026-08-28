@@ -32,19 +32,33 @@ static void commit_help(void) {
     printf("    --amend         Replace the last commit\n");
 }
 
-/* -a: 自动暂存 Index 中已跟踪且工作区有修改的文件 */
+/* -a: 自动暂存所有已跟踪文件的修改和删除；不添加未跟踪文件。 */
 static void auto_stage_all(Index *idx, ObjectStore *store) {
-    for (size_t i = 0; i < idx->count; i++) {
+    size_t i = 0;
+    while (i < idx->count) {
         IndexEntry *entry = &idx->entries[i];
-        uint8_t *data;
-        size_t size;
-        if (file_read_all(entry->name, &data, &size) != 0) continue;
+
+        /* 已跟踪文件从工作区删除：等价于自动 git rm。 */
+        if (!file_exists(entry->name)) {
+            char path[1024];
+            snprintf(path, sizeof(path), "%s", entry->name);
+            index_remove(idx, path);
+            /* index_remove 会把后续条目前移，所以这里不递增 i。 */
+            continue;
+        }
+
+        uint8_t *data = NULL;
+        size_t size = 0;
+        if (file_read_all(entry->name, &data, &size) != 0) {
+            i++;
+            continue;
+        }
 
         Hash current_hash;
         object_hash(OBJ_BLOB, data, size, &current_hash);
 
         if (!hash_equal(&current_hash, &entry->hash)) {
-            /* 文件已修改，写入新 blob 并更新 index */
+            /* 文件已修改，写入新 blob 并更新 Index。 */
             Hash new_hash;
             if (object_store_write(store, OBJ_BLOB, data, size, &new_hash) == 0) {
                 entry->hash = new_hash;
@@ -52,6 +66,7 @@ static void auto_stage_all(Index *idx, ObjectStore *store) {
             }
         }
         free(data);
+        i++;
     }
 }
 
