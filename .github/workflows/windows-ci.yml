@@ -4,8 +4,6 @@ on:
   push:
     branches:
       - master
-      - audit/teaching-correctness
-      - port/linux-support
   pull_request:
   workflow_dispatch:
 
