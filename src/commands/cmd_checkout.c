@@ -133,30 +133,52 @@ static int tree_find_hash(ObjectStore *store, const Tree *root, const char *targ
  *    且目标分支该文件内容不同 → 拒绝切换
  * 2. 用目标分支的 tree 同步工作区和 Index
  */
-static int sync_worktree(ObjectStore *store, Index *idx, const Hash *target_commit) {
-    /* 读取目标分支的 tree */
+static int sync_worktree(ObjectStore *store, Index *idx,
+                         const Hash *current_commit,
+                         const Hash *target_commit) {
     Tree target_tree = {0};
     if (commit_read_tree(store, target_commit, &target_tree) != 0) {
-        mgit_error("cannot read target branch tree");
+        mgit_error("cannot read target commit tree");
         return -1;
     }
 
-    /* 1. 安全检查：本地修改会被覆盖？ */
+    /*
+     * mgit 采用保守但清晰的 checkout contract：
+     * tracked Index / Working Tree 必须与当前 HEAD 一致。
+     * 真实 Git 对某些不冲突修改更宽松；mgit 不复制这些例外。
+     */
+    Commit current;
+    memset(&current, 0, sizeof(current));
+    if (commit_read(store, current_commit, &current) != 0) {
+        tree_free(&target_tree);
+        return -1;
+    }
+
+    Hash index_tree;
+    if (index_write_tree(idx, store, &index_tree) != 0) {
+        commit_free(&current);
+        tree_free(&target_tree);
+        return -1;
+    }
+    if (!hash_equal(&index_tree, &current.tree)) {
+        mgit_error("cannot checkout with staged changes");
+        mgit_error("commit or reset the Index before checkout");
+        commit_free(&current);
+        tree_free(&target_tree);
+        return -1;
+    }
+    commit_free(&current);
+
     for (size_t i = 0; i < idx->count; i++) {
         IndexEntry *ie = &idx->entries[i];
+        uint8_t *data = NULL;
+        size_t size = 0;
 
-        Hash target_hash;
-        int in_target = (tree_find_hash(store, &target_tree, ie->name, &target_hash) == 0);
-
-        if (in_target && hash_equal(&ie->hash, &target_hash)) {
-            continue;  /* 目标分支内容相同，切换无影响 */
-        }
-
-        /* 内容不同（或目标分支没有此文件）：检查工作区是否干净 */
-        uint8_t *data;
-        size_t size;
         if (file_read_all(ie->name, &data, &size) != 0) {
-            continue;  /* 文件已不存在（用户手动删除），允许切换 */
+            mgit_error("cannot checkout with unstaged deletion: %s", ie->name);
+            mgit_error("commit or stash your changes before checkout");
+            tree_free(&target_tree);
+            return -1;
         }
 
         Hash worktree_hash;
@@ -164,19 +186,34 @@ static int sync_worktree(ObjectStore *store, Index *idx, const Hash *target_comm
         free(data);
 
         if (!hash_equal(&worktree_hash, &ie->hash)) {
-            mgit_error("Your local changes to '%s' would be overwritten by checkout.\n"
-                       "Please commit your changes or stash them before you switch branches.",
-                       ie->name);
+            mgit_error("cannot checkout with unstaged changes: %s", ie->name);
+            mgit_error("commit or stash your changes before checkout");
             tree_free(&target_tree);
             return -1;
         }
     }
 
-    /* 2. 同步工作区和 Index（删除多余文件 + 恢复目标分支文件） */
+    /* 目标 tree 不能覆盖当前未跟踪文件。 */
+    TreeFlatEntry *flat = NULL;
+    size_t flat_count = 0;
+    if (tree_flatten(store, &target_tree, &flat, &flat_count) != 0) {
+        tree_free(&target_tree);
+        return -1;
+    }
+    for (size_t i = 0; i < flat_count; i++) {
+        if (!index_find(idx, flat[i].path) && file_exists(flat[i].path)) {
+            mgit_error("untracked file would be overwritten by checkout: %s",
+                       flat[i].path);
+            free(flat);
+            tree_free(&target_tree);
+            return -1;
+        }
+    }
+    free(flat);
+
     tree_restore_worktree(store, idx, &target_tree);
     tree_free(&target_tree);
-    index_write(idx);
-    return 0;
+    return index_write(idx);
 }
 
 /* 解析用于 detached HEAD 的 commit-ish：引用名或 4..40 位 commit 前缀。 */
@@ -335,7 +372,8 @@ static int checkout_run(int argc, char **argv) {
     char old_hex[HASH_HEX_SIZE];
     memset(old_hex, '0', 40);
     old_hex[40] = 0;
-    if (ref_resolve_head_quiet(refs, &old_head_hash) == 0) {
+    int has_old_head = (ref_resolve_head_quiet(refs, &old_head_hash) == 0);
+    if (has_old_head) {
         hash_to_hex(&old_head_hash, old_hex);
     }
 
@@ -348,7 +386,8 @@ static int checkout_run(int argc, char **argv) {
         return -1;
     }
 
-    if (sync_worktree(store, idx, &target_hash) != 0) {
+    if (!has_old_head ||
+        sync_worktree(store, idx, &old_head_hash, &target_hash) != 0) {
         index_close(idx);
         object_store_close(store);
         ref_manager_close(refs);
