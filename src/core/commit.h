@@ -18,8 +18,6 @@
  * <message>
  */
 
-#define MAX_PARENTS 16
-
 /* 作者/提交者信息 */
 typedef struct {
     char *name;
@@ -31,7 +29,7 @@ typedef struct {
 /* Commit 对象 */
 typedef struct {
     Hash tree;                      /* 指向根 tree */
-    Hash parents[MAX_PARENTS];      /* 父 commit */
+    Hash *parents;                  /* 父 commit 动态数组 */
     int parent_count;               /* 父 commit 数量 */
     Signature author;
     Signature committer;
