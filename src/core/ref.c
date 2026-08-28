@@ -300,35 +300,37 @@ int ref_list_branches(RefManager *mgr, char branches[][256], int max_count) {
     }
 
     int count = 0;
+    int truncated = 0;
     do {
         if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-        if (count >= max_count) break;
+        if (count >= max_count) { truncated = 1; break; }
         
         snprintf(branches[count], 256, "refs/heads/%s", ffd.cFileName);
         count++;
     } while (FindNextFileA(hFind, &ffd) != 0);
     
     FindClose(hFind);
-    return count;
+    return truncated ? -2 : count;
 #else
     /* POSIX: 使用 opendir/readdir */
     DIR *dir = opendir(refs_dir);
     if (!dir) return 0;
 
     int count = 0;
+    int truncated = 0;
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
             continue;
         }
-        if (count >= max_count) break;
+        if (count >= max_count) { truncated = 1; break; }
         
         snprintf(branches[count], 256, "refs/heads/%s", entry->d_name);
         count++;
     }
 
     closedir(dir);
-    return count;
+    return truncated ? -2 : count;
 #endif
 }
 
