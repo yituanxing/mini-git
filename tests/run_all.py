@@ -212,7 +212,7 @@ def test_network() -> None:
 
             verify = d / "verify"
             git(d, "clone", "-q", f"{server.base_url}/srv.git", str(verify))
-            check((verify / "pushed.txt").read_bytes() == b"pushed by mgit\n",
+            check((verify / "pushed.txt").read_text(encoding="utf-8") == "pushed by mgit\n",
                   "real Git reads Smart HTTP push from mgit")
             git(repos / "srv.git", "fsck", "--full")
             check(True, "server object database stays valid after mgit push")
