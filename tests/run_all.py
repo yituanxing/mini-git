@@ -666,6 +666,72 @@ def test_merge() -> None:
               "mgit merge explicitly rejects detached HEAD")
 
 
+        # MERGE_HEAD is durable state, not a temporary file to discard.
+        state = root / "state"
+        state.mkdir()
+        mgit(state, "init")
+        write(state / "f.txt", b"base\n")
+        mgit(state, "add", ".")
+        mgit(state, "commit", "-m", "base")
+        mgit(state, "branch", "side")
+
+        mgit(state, "checkout", "side")
+        write(state / "f.txt", b"side\n")
+        mgit(state, "add", ".")
+        mgit(state, "commit", "-m", "side")
+
+        mgit(state, "checkout", "master")
+        write(state / "f.txt", b"master\n")
+        mgit(state, "add", ".")
+        mgit(state, "commit", "-m", "master")
+        master_tip = out(git(state, "rev-parse", "HEAD")).strip()
+
+        conflict = run([MGIT, "merge", "side"], cwd=state)
+        check(conflict.returncode != 0 and (state / ".git" / "MERGE_HEAD").is_file(),
+              "conflicting merge records MERGE_HEAD")
+
+        saved_merge_head = (state / ".git" / "MERGE_HEAD").read_text().strip()
+        again = run([MGIT, "merge", "side"], cwd=state)
+        check(again.returncode != 0 and "previous merge" in text(again).lower(),
+              "second merge is rejected while previous merge is unresolved")
+        check((state / ".git" / "MERGE_HEAD").read_text().strip() == saved_merge_head,
+              "rejected second merge preserves original MERGE_HEAD")
+
+        soft = run([MGIT, "reset", "--soft", "HEAD"], cwd=state)
+        check(soft.returncode != 0 and "middle of a merge" in text(soft).lower(),
+              "reset --soft is rejected during an unresolved merge")
+        check((state / ".git" / "MERGE_HEAD").is_file(),
+              "failed soft reset preserves merge state")
+
+        mgit(state, "reset", "--mixed", "HEAD")
+        check(not (state / ".git" / "MERGE_HEAD").exists(),
+              "reset --mixed aborts merge state")
+        check(out(git(state, "rev-parse", "HEAD")).strip() == master_tip,
+              "mixed merge abort keeps branch at pre-merge HEAD")
+
+        # Clean the conflict-marked Working Tree, then prove --hard also aborts.
+        git(state, "reset", "--hard", "HEAD")
+        check(run([MGIT, "merge", "side"], cwd=state).returncode != 0,
+              "fixture can enter merge conflict again")
+        mgit(state, "reset", "--hard", "HEAD")
+        check(not (state / ".git" / "MERGE_HEAD").exists() and
+              (state / "f.txt").read_text(encoding="utf-8") == "master\n",
+              "reset --hard clears merge state and restores Working Tree")
+
+        # Finally resolve a conflict and commit it: MERGE_HEAD must survive
+        # until the branch update succeeds, then disappear.
+        check(run([MGIT, "merge", "side"], cwd=state).returncode != 0,
+              "fixture can enter merge conflict for resolution")
+        write(state / "f.txt", b"resolved\n")
+        mgit(state, "add", "f.txt")
+        mgit(state, "commit", "-m", "resolve merge")
+        check(not (state / ".git" / "MERGE_HEAD").exists(),
+              "successful merge commit clears MERGE_HEAD")
+        merge_parents = out(git(state, "rev-list", "--parents", "-n", "1", "HEAD")).split()
+        check(len(merge_parents) == 3,
+              "resolved merge commit keeps both parents")
+
+
 
 
 def test_abbrev() -> None:
