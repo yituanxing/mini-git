@@ -165,6 +165,35 @@ def test_compat() -> None:
 
 
 
+
+def test_commit() -> None:
+    print("\n== commit ==")
+    with tempdir("commit") as d:
+        mgit(d, "init")
+        write(d / "a.txt", b"a1\n")
+        write(d / "b.txt", b"b1\n")
+        mgit(d, "add", ".")
+        mgit(d, "commit", "-m", "base")
+
+        # -a operates on already tracked paths: modified + deleted.
+        write(d / "a.txt", b"a2\n")
+        (d / "b.txt").unlink()
+        write(d / "untracked.txt", b"do not include me\n")
+        mgit(d, "commit", "-a", "-m", "commit-a")
+
+        check(out(git(d, "show", "HEAD:a.txt")).replace("\r\n", "\n") == "a2\n",
+              "commit -a includes modified tracked file")
+        check(run([GIT, "cat-file", "-e", "HEAD:b.txt"], cwd=d).returncode != 0,
+              "commit -a includes tracked deletion")
+        tree_names = out(git(d, "ls-tree", "-r", "--name-only", "HEAD"))
+        check("untracked.txt" not in tree_names,
+              "commit -a does not add untracked files")
+        check("untracked.txt" in out(git(d, "status", "--porcelain")),
+              "untracked file remains untracked after commit -a")
+        git(d, "fsck", "--full")
+        check(True, "real Git accepts commit -a result")
+
+
 def test_diff() -> None:
     print("\n== diff ==")
     with tempdir("diff") as d:
@@ -340,6 +369,7 @@ def test_network() -> None:
 TESTS = {
     "basic": test_basic,
     "compat": test_compat,
+    "commit": test_commit,
     "diff": test_diff,
     "reset": test_reset,
     "dogfood": test_dogfood,
