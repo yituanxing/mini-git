@@ -845,7 +845,7 @@ def test_deep_graph() -> None:
         repo = root / "merge"
         repo.mkdir()
         mgit(repo, "init")
-        empty_tree = out(mgit(repo, "write-tree")).strip()
+        empty_tree = store_object(repo, "tree", b"")
 
         base = commit(repo, empty_tree, [], "base")
         ours = base
@@ -874,7 +874,7 @@ def test_deep_graph() -> None:
         src.mkdir()
         dst.mkdir()
         mgit(src, "init")
-        src_tree = out(mgit(src, "write-tree")).strip()
+        src_tree = store_object(src, "tree", b"")
         tip = commit(src, src_tree, [], "root")
         for i in range(1105):
             tip = commit(src, src_tree, [tip], f"c-{i}")
