@@ -251,6 +251,26 @@ def test_checkout() -> None:
         check(detached_tip[:7] in text(mgit(d, "reflog")),
               "reflog keeps detached commit recoverable after leaving it")
 
+        # This teaching implementation restores the whole target tree, so it
+        # deliberately requires tracked state to be clean before checkout.
+        write(d / "staged.txt", b"staged\n")
+        mgit(d, "add", "staged.txt")
+        before = out(git(d, "rev-parse", "HEAD")).strip()
+        refused = run([MGIT, "checkout", c1[:7]], cwd=d)
+        check(refused.returncode != 0 and "staged" in text(refused).lower(),
+              "checkout refuses staged changes instead of overwriting Index")
+        check(out(git(d, "rev-parse", "HEAD")).strip() == before,
+              "refused staged checkout leaves HEAD unchanged")
+        git(d, "reset", "--hard", "HEAD")
+
+        (d / "a.txt").unlink()
+        refused = run([MGIT, "checkout", c1[:7]], cwd=d)
+        check(refused.returncode != 0 and "deletion" in text(refused).lower(),
+              "checkout refuses tracked Working Tree deletion")
+        check(not (d / "a.txt").exists(),
+              "refused checkout preserves local deletion")
+        git(d, "reset", "--hard", "HEAD")
+
 
 def test_commit() -> None:
     print("\n== commit ==")
@@ -468,6 +488,88 @@ def test_stash() -> None:
               "stash pop removes the restored entry")
 
 
+
+def test_merge() -> None:
+    print("\n== merge ==")
+    with tempdir("merge") as root:
+        # Fast-forward: move the branch ref; do not invent a merge commit.
+        ff = root / "ff"
+        ff.mkdir()
+        mgit(ff, "init")
+        write(ff / "base.txt", b"base\n")
+        mgit(ff, "add", ".")
+        mgit(ff, "commit", "-m", "base")
+        mgit(ff, "branch", "feature")
+        mgit(ff, "checkout", "feature")
+        write(ff / "feature.txt", b"feature\n")
+        mgit(ff, "add", ".")
+        mgit(ff, "commit", "-m", "feature")
+        feature_tip = out(git(ff, "rev-parse", "HEAD")).strip()
+        mgit(ff, "checkout", "master")
+        mgit(ff, "merge", "feature")
+        check(out(git(ff, "rev-parse", "HEAD")).strip() == feature_tip,
+              "fast-forward merge moves master to existing commit")
+        parents = out(git(ff, "rev-list", "--parents", "-n", "1", "HEAD")).split()
+        check(len(parents) == 2,
+              "fast-forward merge does not create a two-parent commit")
+
+        # Diverged histories: create a real two-parent merge commit.
+        mgit(ff, "branch", "side")
+        write(ff / "master.txt", b"master\n")
+        mgit(ff, "add", ".")
+        mgit(ff, "commit", "-m", "master work")
+        master_before = out(git(ff, "rev-parse", "HEAD")).strip()
+        mgit(ff, "checkout", "side")
+        write(ff / "side.txt", b"side\n")
+        mgit(ff, "add", ".")
+        mgit(ff, "commit", "-m", "side work")
+        side_tip = out(git(ff, "rev-parse", "HEAD")).strip()
+        mgit(ff, "checkout", "master")
+        mgit(ff, "merge", "side")
+        merge_line = out(git(ff, "rev-list", "--parents", "-n", "1", "HEAD")).split()
+        check(len(merge_line) == 3,
+              "true merge creates a commit with two parents")
+        check(merge_line[1] == master_before and merge_line[2] == side_tip,
+              "merge parents are old HEAD then merged branch tip")
+
+        # Dirty tracked state is rejected before merge mutates history.
+        dirty = root / "dirty"
+        dirty.mkdir()
+        mgit(dirty, "init")
+        write(dirty / "a.txt", b"base\n")
+        mgit(dirty, "add", ".")
+        mgit(dirty, "commit", "-m", "base")
+        mgit(dirty, "branch", "feature")
+        mgit(dirty, "checkout", "feature")
+        write(dirty / "feature.txt", b"feature\n")
+        mgit(dirty, "add", ".")
+        mgit(dirty, "commit", "-m", "feature")
+        mgit(dirty, "checkout", "master")
+        before = out(git(dirty, "rev-parse", "HEAD")).strip()
+
+        write(dirty / "staged.txt", b"staged\n")
+        mgit(dirty, "add", "staged.txt")
+        refused = run([MGIT, "merge", "feature"], cwd=dirty)
+        check(refused.returncode != 0 and "staged" in text(refused).lower(),
+              "merge refuses staged local changes")
+        check(out(git(dirty, "rev-parse", "HEAD")).strip() == before,
+              "refused dirty merge leaves branch tip unchanged")
+        git(dirty, "reset", "--hard", "HEAD")
+
+        (dirty / "a.txt").unlink()
+        refused = run([MGIT, "merge", "feature"], cwd=dirty)
+        check(refused.returncode != 0 and "deletion" in text(refused).lower(),
+              "merge refuses unstaged tracked deletion")
+        check(not (dirty / "a.txt").exists(),
+              "refused merge preserves local deletion")
+        git(dirty, "reset", "--hard", "HEAD")
+
+        mgit(dirty, "checkout", before[:7])
+        refused = run([MGIT, "merge", "feature"], cwd=dirty)
+        check(refused.returncode != 0 and "current branch" in text(refused).lower(),
+              "mgit merge explicitly rejects detached HEAD")
+
+
 def test_mainline() -> None:
     print("\n== mainline ==")
     with tempdir("mainline") as d:
@@ -559,6 +661,7 @@ TESTS = {
     "reset": test_reset,
     "dogfood": test_dogfood,
     "mainline": test_mainline,
+    "merge": test_merge,
     "stash": test_stash,
     "network": test_network,
 }
