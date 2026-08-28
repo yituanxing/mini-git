@@ -349,11 +349,17 @@ int remote_send_reachable(const char *src_git_dir, const char *dst_git_dir,
         return -1;
     }
 
-    Hash queue[1000];
-    int head = 0, tail = 0;
+    size_t cap = 64;
+    size_t head = 0, tail = 0;
+    Hash *queue = (Hash *)malloc(cap * sizeof(Hash));
+    if (!queue) {
+        object_store_close(src);
+        object_store_close(dst);
+        return -1;
+    }
     queue[tail++] = *commit_hash;
-    int ret = 0;
 
+    int ret = 0;
     while (head < tail) {
         Hash h = queue[head++];
 
@@ -370,7 +376,12 @@ int remote_send_reachable(const char *src_git_dir, const char *dst_git_dir,
 
         Commit commit;
         memset(&commit, 0, sizeof(commit));
-        commit_parse(obj.data, obj.size, &commit);
+        if (commit_parse(obj.data, obj.size, &commit) != 0) {
+            object_free(&obj);
+            commit_free(&commit);
+            ret = -1;
+            break;
+        }
         object_free(&obj);
 
         if (remote_copy_object(src, dst, &h) != 0 ||
@@ -381,13 +392,24 @@ int remote_send_reachable(const char *src_git_dir, const char *dst_git_dir,
         }
 
         for (int i = 0; i < commit.parent_count; i++) {
-            if (tail < 1000 && !object_exists(dst, &commit.parents[i])) {
-                queue[tail++] = commit.parents[i];
+            if (object_exists(dst, &commit.parents[i])) continue;
+            if (tail == cap) {
+                size_t ncap = cap * 2;
+                Hash *p = (Hash *)realloc(queue, ncap * sizeof(Hash));
+                if (!p) {
+                    ret = -1;
+                    break;
+                }
+                queue = p;
+                cap = ncap;
             }
+            queue[tail++] = commit.parents[i];
         }
         commit_free(&commit);
+        if (ret != 0) break;
     }
 
+    free(queue);
     object_store_close(src);
     object_store_close(dst);
     return ret;
