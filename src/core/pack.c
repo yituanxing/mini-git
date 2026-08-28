@@ -768,13 +768,13 @@ int pack_contains(ObjectStore *store, const Hash *hash) {
 }
 
 /*
- * 在所有 idx 中按十六进制前缀查找对象（短哈希支持）
- * 扫描每个 idx 的哈希表，返回第一个匹配项。
+ * 在所有 idx 中按十六进制前缀查找对象（短哈希支持）。
  *
- * @param prefix  十六进制前缀（1-40 字符，全小写）
- * @param plen    前缀长度
- * @param out     输出：完整哈希
- * @return        0 找到，-1 未找到
+ * Git 的 abbreviated object name 必须唯一。相同对象可能同时出现在多个
+ * pack 中，因此相同完整 OID 的重复命中不算歧义；两个不同 OID 命中同一
+ * 前缀则返回 -2。
+ *
+ * @return 0 唯一命中，-1 未找到，-2 前缀歧义
  */
 int pack_find_by_prefix(ObjectStore *store, const char *prefix,
                         size_t plen, Hash *out) {
@@ -784,9 +784,11 @@ int pack_find_by_prefix(ObjectStore *store, const char *prefix,
     DIR *dir = opendir(pack_dir);
     if (!dir) return -1;
 
-    int found = -1;
+    int have = 0;
+    Hash match;
     struct dirent *d;
-    while ((d = readdir(dir)) != NULL && found != 0) {
+
+    while ((d = readdir(dir)) != NULL) {
         const char *name = d->d_name;
         size_t len = strlen(name);
         if (len < 5 || strcmp(name + len - 4, ".idx") != 0) continue;
@@ -797,22 +799,29 @@ int pack_find_by_prefix(ObjectStore *store, const char *prefix,
         IdxInfo ix;
         if (idx_load(idx_path, &ix) != 0) continue;
 
-        /* 哈希表按哈希排序，逐条比对十六进制前缀 */
         char hex[HASH_HEX_SIZE];
         for (uint32_t i = 0; i < ix.count; i++) {
             Hash cand;
             memcpy(cand.bytes, ix.shas + (size_t)i * 20, HASH_SIZE);
             hash_to_hex(&cand, hex);
-            if (strncmp(hex, prefix, plen) == 0) {
-                *out = cand;
-                found = 0;
-                break;
+            if (strncmp(hex, prefix, plen) != 0) continue;
+
+            if (!have) {
+                match = cand;
+                have = 1;
+            } else if (!hash_equal(&match, &cand)) {
+                idx_free(&ix);
+                closedir(dir);
+                return -2;
             }
         }
         idx_free(&ix);
     }
+
     closedir(dir);
-    return found;
+    if (!have) return -1;
+    *out = match;
+    return 0;
 }
 
 int pack_stats(ObjectStore *store, size_t *num_packs,
