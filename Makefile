@@ -1,23 +1,41 @@
-# mini-git Makefile (Windows / MinGW)
-# Build: mingw32-make
-# Test : mingw32-make test
-# Clean: mingw32-make clean
+# mini-git Makefile (Windows / MinGW + Linux / GNU make)
+#
+# Windows:
+#   mingw32-make
+#   mingw32-make test
+#
+# Linux:
+#   make
+#   make test
+#
+# Override compiler/flags in the usual Make way, e.g.:
+#   make CC=clang
 
 CC = gcc
 CFLAGS = -Wall -Wextra -std=c99 -g
-LDFLAGS = -lz -lwinhttp
 
-# Output paths
 BUILD_DIR = build
-BIN = $(BUILD_DIR)/mgit.exe
 
-# Sources
+ifeq ($(OS),Windows_NT)
+SHELL := cmd.exe
+BIN = $(BUILD_DIR)/mgit.exe
+HTTP_SRC = src/base/http.c
+LDFLAGS = -lz -lwinhttp
+else
+SHELL := /bin/sh
+BIN = $(BUILD_DIR)/mgit
+HTTP_SRC = src/base/http_curl.c
+LDFLAGS = -lz -lcurl
+endif
+
+# Git semantics are shared across platforms. Only the HTTP backend and
+# build/test shell differ.
 SRCS = \
     src/main.c \
     src/base/hash.c \
     src/base/zlib_util.c \
     src/base/file.c \
-    src/base/http.c \
+    $(HTTP_SRC) \
     src/core/object.c \
     src/core/ref.c \
     src/core/tree.c \
@@ -60,31 +78,38 @@ SRCS = \
 
 OBJS = $(SRCS:src/%.c=$(BUILD_DIR)/%.o)
 
-# Default target
 all: $(BIN)
 
-# Create build directories (Windows compatible)
 $(BUILD_DIR):
+ifeq ($(OS),Windows_NT)
 	@if not exist "$(BUILD_DIR)" mkdir "$(BUILD_DIR)"
 	@if not exist "$(BUILD_DIR)\base" mkdir "$(BUILD_DIR)\base"
 	@if not exist "$(BUILD_DIR)\core" mkdir "$(BUILD_DIR)\core"
 	@if not exist "$(BUILD_DIR)\commands" mkdir "$(BUILD_DIR)\commands"
+else
+	@mkdir -p "$(BUILD_DIR)/base" "$(BUILD_DIR)/core" "$(BUILD_DIR)/commands"
+endif
 
-# Link
 $(BIN): $(OBJS)
 	$(CC) $(OBJS) -o $(BIN) $(LDFLAGS)
 	@echo "Built: $(BIN)"
 
-# Compile
 $(BUILD_DIR)/%.o: src/%.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-# Run regression tests
 test: $(BIN)
+ifeq ($(OS),Windows_NT)
 	powershell -NoProfile -ExecutionPolicy Bypass -File tests\run_all.ps1
+else
+	bash tests/test_linux_smoke.sh
+endif
 
 clean:
+ifeq ($(OS),Windows_NT)
 	@if exist "$(BUILD_DIR)" rmdir /s /q "$(BUILD_DIR)"
+else
+	@rm -rf "$(BUILD_DIR)"
+endif
 
 install: $(BIN)
 	@echo "Binary available at: $(BIN)"
