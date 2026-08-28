@@ -84,6 +84,13 @@ void object_hash(ObjectType type, const void *data, size_t size, Hash *out) {
     sha1_final(&ctx, out);
 }
 
+static int object_hash_matches(const Object *obj, const Hash *expected) {
+    Hash actual;
+    object_hash(obj->type, obj->data, obj->size, &actual);
+    return hash_equal(&actual, expected);
+}
+
+
 /*
  * 获取对象的存储路径
  * 
@@ -186,6 +193,14 @@ int object_store_read(ObjectStore *store, const Hash *hash, Object *obj) {
     /* 松散对象不存在时，回退到 packfile 查找 */
     if (!file_exists(path)) {
         if (pack_read_object(store, hash, obj) == 0) {
+            if (!object_hash_matches(obj, hash)) {
+                char hex[HASH_HEX_SIZE];
+                hash_to_hex(hash, hex);
+                object_free(obj);
+                mgit_error("object hash mismatch: %s", hex);
+                return -1;
+            }
+            obj->hash = *hash;
             return 0;
         }
         char hex[HASH_HEX_SIZE];
@@ -256,6 +271,16 @@ int object_store_read(ObjectStore *store, const Hash *hash, Object *obj) {
     }
     memcpy(obj->data, full_data + header_len, content_size);
     obj->data[content_size] = 0;  /* 方便当文本处理 */
+
+    /* Git 是内容寻址存储：路径里的 OID 必须等于对象内容重新计算出的 OID。 */
+    if (!object_hash_matches(obj, hash)) {
+        char hex[HASH_HEX_SIZE];
+        hash_to_hex(hash, hex);
+        free(full_data);
+        object_free(obj);
+        mgit_error("object hash mismatch: %s", hex);
+        return -1;
+    }
     obj->hash = *hash;
 
     free(full_data);
