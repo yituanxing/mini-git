@@ -87,6 +87,10 @@ int ref_set_head_detached(RefManager *mgr, const Hash *hash);
  * @param max_count 最大分支数
  * @return 分支数量
  */
+/*
+ * List branch refs into caller storage.
+ * Return count on success, -2 if max_count would truncate the list.
+ */
 int ref_list_branches(RefManager *mgr, char branches[][256], int max_count);
 
 /*
