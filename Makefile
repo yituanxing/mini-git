@@ -21,11 +21,13 @@ SHELL := cmd.exe
 BIN = $(BUILD_DIR)/mgit.exe
 HTTP_SRC = src/base/http.c
 LDFLAGS = -lz -lwinhttp
+PYTHON = python
 else
 SHELL := /bin/sh
 BIN = $(BUILD_DIR)/mgit
 HTTP_SRC = src/base/http_curl.c
 LDFLAGS = -lz -lcurl
+PYTHON = python3
 endif
 
 # Git semantics are shared across platforms. Only the HTTP backend and
@@ -98,10 +100,14 @@ $(BUILD_DIR)/%.o: src/%.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 test: $(BIN)
+	$(PYTHON) tests/run_all.py
+
+# Temporary safety net while the old Windows suites are migrated to Python.
+test-legacy: $(BIN)
 ifeq ($(OS),Windows_NT)
 	powershell -NoProfile -ExecutionPolicy Bypass -File tests\run_all.ps1
 else
-	bash tests/test_linux_smoke.sh
+	@echo "legacy PowerShell suite is Windows-only"
 endif
 
 clean:
@@ -114,4 +120,4 @@ endif
 install: $(BIN)
 	@echo "Binary available at: $(BIN)"
 
-.PHONY: all clean test install
+.PHONY: all clean test test-legacy install
