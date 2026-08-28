@@ -42,6 +42,7 @@ SRCS = \
     src/core/ref.c \
     src/core/tree.c \
     src/core/commit.c \
+    src/core/graph.c \
     src/core/index.c \
     src/core/linemerge.c \
     src/core/ignore.c \
