@@ -164,6 +164,62 @@ def test_compat() -> None:
               "mgit reads real Git branch")
 
 
+
+def test_diff() -> None:
+    print("\n== diff ==")
+    with tempdir("diff") as d:
+        mgit(d, "init")
+        write(d / "a.txt", b"v1\n")
+        mgit(d, "add", "a.txt")
+        mgit(d, "commit", "-m", "base")
+
+        # Working Tree differs from Index, while Index still equals HEAD.
+        write(d / "a.txt", b"v2\n")
+        unstaged = text(mgit(d, "diff"))
+        staged = text(mgit(d, "diff", "--cached"))
+        check("a.txt" in unstaged and "modified" in unstaged,
+              "diff shows Working Tree vs Index changes")
+        check("a.txt" not in staged,
+              "diff --cached stays clean when Index still equals HEAD")
+        check(run([GIT, "diff", "--quiet"], cwd=d).returncode != 0,
+              "real Git agrees there is an unstaged change")
+        check(run([GIT, "diff", "--cached", "--quiet"], cwd=d).returncode == 0,
+              "real Git agrees there is no staged change")
+
+        # After add, Index moves to v2: default diff becomes clean while
+        # --cached now sees the staged difference from HEAD.
+        mgit(d, "add", "a.txt")
+        unstaged = text(mgit(d, "diff"))
+        staged = text(mgit(d, "diff", "--cached"))
+        check("a.txt" not in unstaged,
+              "add moves the diff boundary so Working Tree equals Index")
+        check("a.txt" in staged and "modified" in staged,
+              "diff --cached shows Index vs HEAD changes")
+        check(run([GIT, "diff", "--quiet"], cwd=d).returncode == 0,
+              "real Git agrees Working Tree now equals Index")
+        check(run([GIT, "diff", "--cached", "--quiet"], cwd=d).returncode != 0,
+              "real Git agrees Index now differs from HEAD")
+
+        # The three areas can all hold different snapshots at once:
+        # HEAD=v1, Index=v2, Working Tree=v3.
+        write(d / "a.txt", b"v3\n")
+        check("a.txt" in text(mgit(d, "diff")),
+              "default diff still observes Working Tree vs Index")
+        check("a.txt" in text(mgit(d, "diff", "--cached")),
+              "cached diff independently observes Index vs HEAD")
+
+        # Untracked files are outside the Index and are not part of git diff.
+        write(d / "untracked.txt", b"new\n")
+        check("untracked.txt" not in text(mgit(d, "diff")),
+              "default diff ignores untracked files like real Git")
+
+        # Deletion of a tracked file is an unstaged Working Tree change.
+        (d / "a.txt").unlink()
+        deleted = text(mgit(d, "diff"))
+        check("a.txt" in deleted and "deleted" in deleted,
+              "default diff reports tracked Working Tree deletion")
+
+
 def test_dogfood() -> None:
     print("\n== dogfood ==")
     with tempdir("dogfood") as d:
@@ -221,6 +277,7 @@ def test_network() -> None:
 TESTS = {
     "basic": test_basic,
     "compat": test_compat,
+    "diff": test_diff,
     "dogfood": test_dogfood,
     "network": test_network,
 }
