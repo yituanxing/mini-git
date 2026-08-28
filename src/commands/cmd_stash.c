@@ -18,12 +18,15 @@
  * 
  * 临时保存工作区修改
  * 
- * 原理：
- * - stash 本质是一个特殊的 commit，保存当前 Index 状态
- * - 存储在 refs/stash 引用中（栈结构用多个 ref 模拟）
- * - push: 创建 commit 保存当前状态，然后 reset 工作区
- * - pop: 恢复最近一次 stash 的内容
- * - list: 显示所有 stash
+ * 教学语义：
+ * - stash 保存已跟踪文件在 Working Tree + Index 中的本地修改
+ * - push 后 Working Tree 和 Index 回到 HEAD
+ * - 默认不包含 untracked（真实 Git 需 -u 才包含）
+ *
+ * 实现简化：
+ * - mgit 用普通 commit 保存快照，并把多个 hash 逐行写在 .git/refs/stash
+ * - 真实 Git 的 refs/stash 是一个 ref，旧条目放在该 ref 的 reflog 中，
+ *   stash commit 的内部结构也更丰富；这里不复刻这些细节。
  */
 
 static void stash_help(void) {
@@ -83,17 +86,28 @@ static int stash_write_list(Hash *list, int count) {
     return 0;
 }
 
-/* 自动暂存：Index 中已跟踪且工作区有修改的文件，更新到 Index */
-static void auto_stage_modified(Index *idx, ObjectStore *store) {
-    for (size_t i = 0; i < idx->count; i++) {
+/* 把已跟踪文件的 Working Tree 修改/删除折叠进 Index；不碰 untracked。 */
+static void auto_stage_tracked_changes(Index *idx, ObjectStore *store) {
+    size_t i = 0;
+    while (i < idx->count) {
         IndexEntry *entry = &idx->entries[i];
-        uint8_t *data;
-        size_t size;
-        if (file_read_all(entry->name, &data, &size) != 0) continue;
+
+        if (!file_exists(entry->name)) {
+            char path[1024];
+            snprintf(path, sizeof(path), "%s", entry->name);
+            index_remove(idx, path);
+            continue;  /* 后续条目已前移 */
+        }
+
+        uint8_t *data = NULL;
+        size_t size = 0;
+        if (file_read_all(entry->name, &data, &size) != 0) {
+            i++;
+            continue;
+        }
 
         Hash current_hash;
         object_hash(OBJ_BLOB, data, size, &current_hash);
-
         if (!hash_equal(&current_hash, &entry->hash)) {
             Hash new_hash;
             if (object_store_write(store, OBJ_BLOB, data, size, &new_hash) == 0) {
@@ -102,6 +116,7 @@ static void auto_stage_modified(Index *idx, ObjectStore *store) {
             }
         }
         free(data);
+        i++;
     }
 }
 
@@ -122,18 +137,10 @@ static int stash_push(int argc, char **argv) {
     RefManager *refs = ref_manager_open(".git");
     if (!refs) { index_close(idx); object_store_close(store); return -1; }
 
-    if (idx->count == 0) {
-        printf("No local changes to save.\n");
-        ref_manager_close(refs);
-        index_close(idx);
-        object_store_close(store);
-        return 0;
-    }
+    /* 1. 把已跟踪的 Working Tree 修改/删除并入要保存的快照。 */
+    auto_stage_tracked_changes(idx, store);
 
-    /* 1. 先自动暂存工作区修改（stash 保存的是工作区状态，不只是 Index） */
-    auto_stage_modified(idx, store);
-
-    /* 2. 从 Index 创建 tree */
+    /* 2. 从当前 Index 创建 stash tree。 */
     Hash tree_hash;
     if (index_write_tree(idx, store, &tree_hash) != 0) {
         mgit_error("failed to create tree from index");
@@ -145,6 +152,26 @@ static int stash_push(int argc, char **argv) {
     Hash *parent_ptr = NULL;
     if (ref_resolve_head_quiet(refs, &parent_hash) == 0) {
         parent_ptr = &parent_hash;
+    }
+
+    /*
+     * 干净仓库不能产生 stash：比较将要保存的 tree 与 HEAD tree。
+     * untracked 不在 Index 中，因此也自然不会单独触发 stash。
+     */
+    if (parent_ptr) {
+        Commit head_commit;
+        memset(&head_commit, 0, sizeof(head_commit));
+        if (commit_read(store, &parent_hash, &head_commit) == 0) {
+            int clean = hash_equal(&tree_hash, &head_commit.tree);
+            commit_free(&head_commit);
+            if (clean) {
+                printf("No local changes to save.\n");
+                ref_manager_close(refs);
+                index_close(idx);
+                object_store_close(store);
+                return 0;
+            }
+        }
     }
 
     char msg[256];
