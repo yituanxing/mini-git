@@ -39,14 +39,20 @@ int file_mkdir_p(const char *path) {
     }
     
     for (p = tmp + 1; *p; p++) {
-        if (*p == '\\') {
+#ifdef _WIN32
+        int is_sep = (*p == '\\');
+#else
+        int is_sep = (*p == '/');
+#endif
+        if (is_sep) {
+            char sep = *p;
             *p = 0;
             if (!file_is_dir(tmp)) {
                 if (MKDIR(tmp) != 0 && errno != EEXIST) {
                     return -1;
                 }
             }
-            *p = '\\';
+            *p = sep;
         }
     }
     
