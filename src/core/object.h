@@ -91,10 +91,10 @@ int object_store_read(ObjectStore *store, const Hash *hash, Object *obj);
 int object_exists(ObjectStore *store, const Hash *hash);
 
 /*
- * 按十六进制前缀查找对象（扫描目录，能找到不可达对象）
- * @param prefix  十六进制前缀（1-40 字符）
+ * 按十六进制前缀查找对象（扫描 loose + pack，能找到不可达对象）
+ * @param prefix  十六进制前缀（4-40 字符，大小写均可）
  * @param type    限定对象类型；OBJ_NONE 表示不限
- * @return        0 找到，-1 未找到
+ * @return        0 唯一命中，-1 未找到/太短，-2 前缀歧义
  */
 int object_find_by_prefix(ObjectStore *store, const char *prefix,
                           ObjectType type, Hash *out);
