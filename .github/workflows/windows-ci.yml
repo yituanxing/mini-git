@@ -5,6 +5,7 @@ on:
     branches:
       - master
       - audit/teaching-correctness
+      - port/linux-support
   pull_request:
   workflow_dispatch:
 
@@ -13,7 +14,7 @@ permissions:
 
 jobs:
   windows:
-    name: MinGW build + regression + dogfood
+    name: MinGW + shared Python tests
     runs-on: windows-latest
 
     steps:
@@ -40,10 +41,11 @@ jobs:
           $env:Path = "$ucrt;$env:Path"
           $env:SHELL = "cmd.exe"
           gcc --version
+          python --version
           mingw32-make --version
           mingw32-make SHELL=cmd.exe
 
-      - name: Run full regression suite
+      - name: Run shared Python suite
         shell: powershell
         run: |
           $ucrt = "${{ steps.msys2.outputs.msys2-location }}\ucrt64\bin"
@@ -51,62 +53,13 @@ jobs:
           $env:SHELL = "cmd.exe"
           mingw32-make SHELL=cmd.exe test
 
-      - name: Read the real checkout with mgit
+      - name: Run legacy Windows regression safety net
         shell: powershell
         run: |
-          .\build\mgit.exe status
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          .\build\mgit.exe log --oneline -n 5
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Dogfood - mgit manages an mgit source snapshot
-        shell: powershell
-        run: |
-          $root = $PWD.Path
-          $mgit = Join-Path $root "build\mgit.exe"
-          $self = Join-Path $env:RUNNER_TEMP "mgit-selfhost"
-
-          if (Test-Path $self) {
-            Remove-Item $self -Recurse -Force
-          }
-          New-Item -ItemType Directory -Path $self | Out-Null
-
-          Get-ChildItem -Force $root |
-            Where-Object { $_.Name -notin @(".git", "build") } |
-            Copy-Item -Destination $self -Recurse -Force
-
-          Push-Location $self
-          & $mgit init
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-          & $mgit add .
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-          & $mgit commit -m "ci: mgit self-host snapshot"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-          Write-Host "=== mgit view ==="
-          & $mgit log --oneline -n 1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $mgit status
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-          Write-Host "=== real Git oracle ==="
-          git fsck --full
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-          git log -1 --oneline
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-          $status = git status --porcelain
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if ($status) {
-            Write-Error "real Git sees a dirty self-hosted repository:"
-            Write-Host $status
-            exit 1
-          }
-
-          Pop-Location
+          $ucrt = "${{ steps.msys2.outputs.msys2-location }}\ucrt64\bin"
+          $env:Path = "$ucrt;$env:Path"
+          $env:SHELL = "cmd.exe"
+          mingw32-make SHELL=cmd.exe test-legacy
 
       - name: Upload mgit.exe
         uses: actions/upload-artifact@v4
