@@ -418,6 +418,56 @@ def test_dogfood() -> None:
 
 
 
+
+def test_stash() -> None:
+    print("\n== stash ==")
+    with tempdir("stash") as d:
+        mgit(d, "init")
+        write(d / "a.txt", b"a1\n")
+        write(d / "b.txt", b"b1\n")
+        mgit(d, "add", ".")
+        mgit(d, "commit", "-m", "base")
+
+        # A clean tree must not create a stash entry.
+        clean = mgit(d, "stash")
+        check("No local changes to save" in text(clean),
+              "stash on a clean repository is a no-op")
+        check("(no stashes)" in text(mgit(d, "stash", "list")),
+              "clean stash does not create an entry")
+
+        # Default stash saves tracked modifications/deletions, but not untracked.
+        write(d / "a.txt", b"a2\n")
+        (d / "b.txt").unlink()
+        write(d / "untracked.txt", b"keep me\n")
+
+        mgit(d, "stash")
+        check((d / "a.txt").read_text(encoding="utf-8") == "a1\n",
+              "stash restores modified tracked file to HEAD")
+        check((d / "b.txt").read_text(encoding="utf-8") == "b1\n",
+              "stash restores deleted tracked file to HEAD")
+        check((d / "untracked.txt").read_text(encoding="utf-8") == "keep me\n",
+              "default stash leaves untracked files alone")
+        check(run([GIT, "diff", "--quiet"], cwd=d).returncode == 0 and
+              run([GIT, "diff", "--cached", "--quiet"], cwd=d).returncode == 0,
+              "tracked Working Tree and Index are clean after stash")
+        check("stash@{0}" in text(mgit(d, "stash", "list")),
+              "stash entry is listed")
+
+        mgit(d, "stash", "pop")
+        check((d / "a.txt").read_text(encoding="utf-8") == "a2\n",
+              "stash pop restores tracked modification")
+        check(not (d / "b.txt").exists(),
+              "stash pop restores tracked deletion")
+        check((d / "untracked.txt").exists(),
+              "stash pop preserves unrelated untracked file")
+        check(run([GIT, "diff", "--quiet"], cwd=d).returncode != 0,
+              "restored stash appears as unstaged tracked changes")
+        check(run([GIT, "diff", "--cached", "--quiet"], cwd=d).returncode == 0,
+              "stash pop leaves Index aligned with HEAD")
+        check("(no stashes)" in text(mgit(d, "stash", "list")),
+              "stash pop removes the restored entry")
+
+
 def test_mainline() -> None:
     print("\n== mainline ==")
     with tempdir("mainline") as d:
@@ -509,6 +559,7 @@ TESTS = {
     "reset": test_reset,
     "dogfood": test_dogfood,
     "mainline": test_mainline,
+    "stash": test_stash,
     "network": test_network,
 }
 
