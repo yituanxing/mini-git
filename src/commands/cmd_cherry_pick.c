@@ -25,7 +25,8 @@
  *
  * 冲突处理：
  * - 当前 Index 中同一文件已有不同修改 → 写冲突标记文件
- * - 有冲突时不自动提交，与真实 Git 行为一致
+ * - mgit 不实现 Git 的 CHERRY_PICK_HEAD / sequencer；冲突后由用户 add + commit
+ * - merge commit 需要 mainline parent 选择；mgit 不实现 -m，因此明确拒绝
  *
  * cherry_pick_commit() 被 rebase 复用（rebase = 批量 cherry-pick）
  */
@@ -130,6 +131,17 @@ int cherry_pick_commit(ObjectStore *store, RefManager *refs, Index *idx,
     memset(&target, 0, sizeof(target));
     if (commit_read(store, target_hash, &target) != 0) {
         mgit_error("cannot read commit");
+        return -1;
+    }
+
+    /*
+     * merge commit 有多个 parent，不能默认把 parents[0] 当成主线。
+     * 真实 Git 需要 -m/--mainline；mgit 不实现该选项，因此拒绝。
+     */
+    if (target.parent_count > 1) {
+        mgit_error("cannot cherry-pick a merge commit without a mainline parent");
+        mgit_error("mgit does not implement cherry-pick -m");
+        commit_free(&target);
         return -1;
     }
 
@@ -371,8 +383,7 @@ static int cherry_pick_run(int argc, char **argv) {
     int r = cherry_pick_commit(store, refs, idx, &target_hash, NULL);
 
     if (r == 1) {
-        printf("hint: after resolving conflicts, run 'mgit add' and "
-               "'mgit cherry-pick --continue'\n");
+        printf("hint: resolve conflicts, run 'mgit add', then commit the resolved result\n");
     } else if (r == 2) {
         printf("The cherry-pick of %s is empty (no changes to apply).\n", hex7);
     }
