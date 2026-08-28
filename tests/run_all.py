@@ -166,6 +166,44 @@ def test_compat() -> None:
 
 
 
+
+def test_branch() -> None:
+    print("\n== branch ==")
+    with tempdir("branch") as d:
+        mgit(d, "init")
+        write(d / "base.txt", b"base\n")
+        mgit(d, "add", ".")
+        mgit(d, "commit", "-m", "base")
+
+        # A branch whose tip is already an ancestor of HEAD is safe to delete.
+        mgit(d, "branch", "done")
+        write(d / "master.txt", b"master\n")
+        mgit(d, "add", ".")
+        mgit(d, "commit", "-m", "master advances")
+        check(run([GIT, "merge-base", "--is-ancestor", "done", "HEAD"], cwd=d).returncode == 0,
+              "real Git confirms done is merged into HEAD")
+        mgit(d, "branch", "-d", "done")
+        check(run([GIT, "show-ref", "--verify", "--quiet", "refs/heads/done"], cwd=d).returncode != 0,
+              "branch -d deletes a fully merged branch")
+
+        # An unmerged branch must survive safe deletion.
+        mgit(d, "branch", "feature")
+        mgit(d, "checkout", "feature")
+        write(d / "feature.txt", b"feature\n")
+        mgit(d, "add", ".")
+        mgit(d, "commit", "-m", "feature work")
+        feature_tip = out(git(d, "rev-parse", "HEAD")).strip()
+        mgit(d, "checkout", "master")
+
+        check(run([GIT, "merge-base", "--is-ancestor", feature_tip, "HEAD"], cwd=d).returncode != 0,
+              "real Git confirms feature is not merged into HEAD")
+        refused = run([MGIT, "branch", "-d", "feature"], cwd=d)
+        check(refused.returncode != 0,
+              "branch -d refuses an unmerged branch")
+        check(run([GIT, "show-ref", "--verify", "--quiet", "refs/heads/feature"], cwd=d).returncode == 0,
+              "refused branch -d leaves the branch intact")
+
+
 def test_commit() -> None:
     print("\n== commit ==")
     with tempdir("commit") as d:
@@ -369,6 +407,7 @@ def test_network() -> None:
 TESTS = {
     "basic": test_basic,
     "compat": test_compat,
+    "branch": test_branch,
     "commit": test_commit,
     "diff": test_diff,
     "reset": test_reset,
