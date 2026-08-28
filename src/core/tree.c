@@ -250,6 +250,21 @@ int tree_rebuild_index(ObjectStore *store, Index *idx, const Tree *tree) {
             free(entries);
             return -1;
         }
+
+        /*
+         * We changed only the Index snapshot, not the Working Tree.  The
+         * current file stat therefore must NOT be cached as if it described
+         * the new blob hash (notably after reset --mixed).  Zeroing the stat
+         * cache forces Git/mgit to compare content on the next status/diff.
+         */
+        IndexEntry *ie = &idx->entries[idx->count - 1];
+        ie->ctime_sec = 0;
+        ie->mtime_sec = 0;
+        ie->dev = 0;
+        ie->ino = 0;
+        ie->uid = 0;
+        ie->gid = 0;
+        ie->size = 0;
     }
 
     free(entries);

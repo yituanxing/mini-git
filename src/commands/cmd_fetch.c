@@ -49,6 +49,13 @@ static size_t collect_local_haves(ObjectStore *store, RefManager *refs,
 
     char branches[64][256];
     int nb = ref_list_branches(refs, branches, 64);
+    /*
+     * haves are negotiation hints, not the fetched ref set.  If there are
+     * more local branches than this small teaching sample, using the first
+     * 64 can only make the server send more objects; it cannot make refs
+     * point at missing objects.
+     */
+    if (nb == -2) nb = 64;
     for (int i = 0; i < nb && tail < 1024; i++) {
         Hash h;
         if (ref_resolve_quiet(refs, branches[i], &h) == 0)
@@ -95,6 +102,7 @@ static size_t collect_local_haves(ObjectStore *store, RefManager *refs,
 static int fetch_from_url(const char *url, const char *remote_name) {
     int rc = -1;
     uint8_t *pack = NULL;
+    Hash *wants = NULL;
 
     /* 1. 引用广告 */
     RefAd ad;
@@ -108,9 +116,15 @@ static int fetch_from_url(const char *url, const char *remote_name) {
     }
 
     /* 2. wants：远端尖端与本地对应引用不一致的 */
-    Hash wants[256];
+    if (ad.count > 0) {
+        wants = (Hash *)malloc(ad.count * sizeof(Hash));
+        if (!wants) {
+            mgit_error("out of memory while collecting fetch wants");
+            goto cleanup;
+        }
+    }
     size_t want_count = 0;
-    for (size_t i = 0; i < ad.count && want_count < 256; i++) {
+    for (size_t i = 0; i < ad.count; i++) {
         RemoteRef *rr = &ad.refs[i];
         char local_ref[512];
         if (strncmp(rr->name, "refs/heads/", 11) == 0) {
@@ -179,7 +193,7 @@ static int fetch_from_url(const char *url, const char *remote_name) {
                        oh, nh, branch, remote_name, branch);
             }
 
-            /* FETCH_HEAD：记录第一个分支（与真实 git 行为一致） */
+            /* 教学简化：FETCH_HEAD 只记录本次广告里的第一个分支。 */
             if (fh && !head_written) {
                 char hex[HASH_HEX_SIZE];
                 hash_to_hex(&rr->hash, hex);
@@ -200,6 +214,7 @@ static int fetch_from_url(const char *url, const char *remote_name) {
     rc = 0;
 
 cleanup:
+    free(wants);
     free(pack);
     if (store) object_store_close(store);
     if (refs) ref_manager_close(refs);
@@ -255,6 +270,12 @@ static int fetch_run(int argc, char **argv) {
     /* 遍历远程的所有分支 */
     char branches[64][256];
     int count = ref_list_branches(remote_refs, branches, 64);
+    if (count == -2) {
+        mgit_error("remote has too many branches for local-path fetch (limit 64)");
+        ref_manager_close(local_refs);
+        ref_manager_close(remote_refs);
+        return -1;
+    }
 
     printf("From %s\n", remote_path);
     int fetched = 0;

@@ -89,10 +89,10 @@ int pack_apply_delta(const uint8_t *base, size_t base_len,
 
 /*
  * 按十六进制前缀在 pack 中查找对象（短哈希支持）
- * @param prefix  十六进制前缀（1-40 字符，全小写）
+ * @param prefix  十六进制前缀
  * @param plen    前缀长度
- * @param out     输出：完整哈希
- * @return        0 找到，-1 未找到
+ * @param out     输出：唯一匹配的完整哈希
+ * @return        0 唯一命中，-1 未找到，-2 前缀歧义
  */
 int pack_find_by_prefix(ObjectStore *store, const char *prefix,
                         size_t plen, Hash *out);

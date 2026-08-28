@@ -77,3 +77,50 @@ int graph_is_ancestor(ObjectStore *store, const Hash *ancestor,
     vec_free(&seen);
     return 0;
 }
+
+
+int graph_find_merge_base(ObjectStore *store, const Hash *ours,
+                          const Hash *theirs, Hash *base_out) {
+    HashVec queue = {0};
+    HashVec seen = {0};
+    size_t head = 0;
+    int rc = -1;
+
+    if (vec_push(&queue, ours) != 0) return -1;
+
+    while (head < queue.count) {
+        Hash cur = queue.items[head++];
+        if (vec_contains(&seen, &cur)) continue;
+        if (vec_push(&seen, &cur) != 0) goto cleanup;
+
+        /*
+         * Preserve the teaching implementation's simple merge-base rule:
+         * breadth-first from ours, choose the nearest commit that is also
+         * reachable from theirs.  The traversal itself is dynamic so a long
+         * history cannot be silently truncated.
+         */
+        if (graph_is_ancestor(store, &cur, theirs)) {
+            *base_out = cur;
+            rc = 0;
+            goto cleanup;
+        }
+
+        Commit commit;
+        memset(&commit, 0, sizeof(commit));
+        if (commit_read(store, &cur, &commit) != 0) continue;
+
+        for (int i = 0; i < commit.parent_count; i++) {
+            if (!vec_contains(&seen, &commit.parents[i]) &&
+                vec_push(&queue, &commit.parents[i]) != 0) {
+                commit_free(&commit);
+                goto cleanup;
+            }
+        }
+        commit_free(&commit);
+    }
+
+cleanup:
+    vec_free(&queue);
+    vec_free(&seen);
+    return rc;
+}

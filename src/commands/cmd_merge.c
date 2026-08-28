@@ -51,37 +51,6 @@ static void ensure_parent_dir(const char *path) {
     }
 }
 
-/* 找 merge base：从 ours 开始 BFS，找第一个也在 theirs 历史中的 commit */
-static int find_merge_base(ObjectStore *store, const Hash *ours, const Hash *theirs,
-                           Hash *base_out) {
-    Hash queue[1000];
-    int head = 0, tail = 0;
-    queue[tail++] = *ours;
-
-    while (head < tail && head < 999) {
-        Hash current = queue[head++];
-
-        /* 检查 current 是否在 theirs 的历史中 */
-        if (graph_is_ancestor(store, &current, theirs)) {
-            *base_out = current;
-            return 0;
-        }
-
-        /* 继续 BFS */
-        Commit commit;
-        memset(&commit, 0, sizeof(commit));
-        if (commit_read(store, &current, &commit) != 0) continue;
-
-        for (int i = 0; i < commit.parent_count; i++) {
-            if (tail < 1000) {
-                queue[tail++] = commit.parents[i];
-            }
-        }
-        commit_free(&commit);
-    }
-    return -1;
-}
-
 /* 读取 blob 内容到 malloc 缓冲区 */
 static int read_blob(ObjectStore *store, const Hash *hash, uint8_t **data, size_t *size) {
     Object obj;
@@ -374,8 +343,16 @@ static int merge_run(int argc, char **argv) {
 
     const char *theirs_branch = argv[1];
 
-    /* 清理上一次合并遗留的 MERGE_HEAD（如果存在） */
-    file_delete(".git/MERGE_HEAD");
+    /*
+     * MERGE_HEAD is not garbage: it is the durable marker for an unfinished
+     * merge.  Starting another merge would lose the second-parent identity
+     * that the eventual commit needs, so reject instead of deleting it.
+     */
+    if (file_exists(".git/MERGE_HEAD")) {
+        mgit_error("you have not concluded your previous merge");
+        mgit_error("commit the resolved result or reset before merging again");
+        return -1;
+    }
 
     ObjectStore *store = object_store_open(".git");
     if (!store) {
@@ -496,7 +473,7 @@ static int merge_run(int argc, char **argv) {
 
     /* 1. 找 merge base */
     Hash base_commit;
-    if (find_merge_base(store, &ours_commit, &theirs_commit, &base_commit) != 0) {
+    if (graph_find_merge_base(store, &ours_commit, &theirs_commit, &base_commit) != 0) {
         mgit_error("cannot find merge base (no common ancestor)");
         ref_manager_close(refs);
         object_store_close(store);

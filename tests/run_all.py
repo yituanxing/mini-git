@@ -12,9 +12,11 @@ remain temporarily as a Windows regression safety net while cases migrate.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import sys
+import zlib
 from pathlib import Path
 
 from testlib import (
@@ -664,6 +666,115 @@ def test_merge() -> None:
               "mgit merge explicitly rejects detached HEAD")
 
 
+        # MERGE_HEAD is durable state, not a temporary file to discard.
+        state = root / "state"
+        state.mkdir()
+        mgit(state, "init")
+        write(state / "f.txt", b"base\n")
+        mgit(state, "add", ".")
+        mgit(state, "commit", "-m", "base")
+        mgit(state, "branch", "side")
+
+        mgit(state, "checkout", "side")
+        write(state / "f.txt", b"side\n")
+        mgit(state, "add", ".")
+        mgit(state, "commit", "-m", "side")
+
+        mgit(state, "checkout", "master")
+        write(state / "f.txt", b"master\n")
+        mgit(state, "add", ".")
+        mgit(state, "commit", "-m", "master")
+        master_tip = out(git(state, "rev-parse", "HEAD")).strip()
+
+        conflict = run([MGIT, "merge", "side"], cwd=state)
+        check(conflict.returncode != 0 and (state / ".git" / "MERGE_HEAD").is_file(),
+              "conflicting merge records MERGE_HEAD")
+
+        saved_merge_head = (state / ".git" / "MERGE_HEAD").read_text().strip()
+        again = run([MGIT, "merge", "side"], cwd=state)
+        check(again.returncode != 0 and "previous merge" in text(again).lower(),
+              "second merge is rejected while previous merge is unresolved")
+        check((state / ".git" / "MERGE_HEAD").read_text().strip() == saved_merge_head,
+              "rejected second merge preserves original MERGE_HEAD")
+
+        soft = run([MGIT, "reset", "--soft", "HEAD"], cwd=state)
+        check(soft.returncode != 0 and "middle of a merge" in text(soft).lower(),
+              "reset --soft is rejected during an unresolved merge")
+        check((state / ".git" / "MERGE_HEAD").is_file(),
+              "failed soft reset preserves merge state")
+
+        mgit(state, "reset", "--mixed", "HEAD")
+        check(not (state / ".git" / "MERGE_HEAD").exists(),
+              "reset --mixed aborts merge state")
+        check(out(git(state, "rev-parse", "HEAD")).strip() == master_tip,
+              "mixed merge abort keeps branch at pre-merge HEAD")
+
+        # Clean the conflict-marked Working Tree, then prove --hard also aborts.
+        git(state, "reset", "--hard", "HEAD")
+        check(run([MGIT, "merge", "side"], cwd=state).returncode != 0,
+              "fixture can enter merge conflict again")
+        mgit(state, "reset", "--hard", "HEAD")
+        check(not (state / ".git" / "MERGE_HEAD").exists() and
+              (state / "f.txt").read_text(encoding="utf-8") == "master\n",
+              "reset --hard clears merge state and restores Working Tree")
+
+        # Finally resolve a conflict and commit it: MERGE_HEAD must survive
+        # until the branch update succeeds, then disappear.
+        check(run([MGIT, "merge", "side"], cwd=state).returncode != 0,
+              "fixture can enter merge conflict for resolution")
+        write(state / "f.txt", b"resolved\n")
+        mgit(state, "add", "f.txt")
+        mgit(state, "commit", "-m", "resolve merge")
+        check(not (state / ".git" / "MERGE_HEAD").exists(),
+              "successful merge commit clears MERGE_HEAD")
+        merge_parents = out(git(state, "rev-list", "--parents", "-n", "1", "HEAD")).split()
+        check(len(merge_parents) == 3,
+              "resolved merge commit keeps both parents")
+
+
+
+
+def test_abbrev() -> None:
+    print("\n== abbreviated object ids ==")
+    with tempdir("abbrev") as d:
+        mgit(d, "init")
+
+        # Find a deterministic 4-hex collision in memory, then write only the
+        # two colliding blobs. This makes the ambiguity test fast on both CI OSes.
+        seen: dict[str, tuple[str, bytes]] = {}
+        pair = None
+        for i in range(20000):
+            data = f"abbrev-collision-{i}\n".encode()
+            raw = f"blob {len(data)}\0".encode() + data
+            oid = hashlib.sha1(raw).hexdigest()
+            prefix = oid[:4]
+            if prefix in seen and seen[prefix][0] != oid:
+                pair = (seen[prefix], (oid, data))
+                break
+            seen[prefix] = (oid, data)
+        check(pair is not None, "test fixture finds a 4-hex SHA-1 prefix collision")
+
+        (oid1, data1), (oid2, data2) = pair
+        write(d / "one.bin", data1)
+        write(d / "two.bin", data2)
+        got1 = out(mgit(d, "hash-object", "-w", "one.bin")).strip()
+        got2 = out(mgit(d, "hash-object", "-w", "two.bin")).strip()
+        check(got1 == oid1 and got2 == oid2 and got1[:4] == got2[:4],
+              "fixture stores two distinct objects sharing a 4-hex prefix")
+
+        ambiguous = run([MGIT, "cat-file", "-t", got1[:4]], cwd=d)
+        check(ambiguous.returncode != 0 and "ambiguous" in text(ambiguous).lower(),
+              "short object ID must be unique, not first-match")
+
+        short = run([MGIT, "cat-file", "-t", got1[:3]], cwd=d)
+        check(short.returncode != 0,
+              "object abbreviation shorter than four hex digits is rejected")
+
+        unique = out(mgit(d, "cat-file", "-t", got1[:8].upper())).strip()
+        check(unique == "blob",
+              "unique abbreviated object IDs accept uppercase hex too")
+
+
 
 def test_integrity() -> None:
     print("\n== integrity ==")
@@ -705,6 +816,80 @@ def test_integrity() -> None:
         truncated = run([MGIT, "status"], cwd=d)
         check(truncated.returncode != 0,
               "Index reader rejects truncated file")
+
+
+
+def test_deep_graph() -> None:
+    print("\n== deep graph ==")
+
+    def store_object(repo: Path, kind: str, payload: bytes) -> str:
+        raw = f"{kind} {len(payload)}\0".encode() + payload
+        oid = hashlib.sha1(raw).hexdigest()
+        path = repo / ".git" / "objects" / oid[:2] / oid[2:]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(zlib.compress(raw))
+        return oid
+
+    def commit(repo: Path, tree: str, parents: list[str], message: str) -> str:
+        lines = [f"tree {tree}\n"]
+        lines.extend(f"parent {p}\n" for p in parents)
+        lines += [
+            "author Tester <t@t.com> 1 +0000\n",
+            "committer Tester <t@t.com> 1 +0000\n",
+            "\n",
+            message + "\n",
+        ]
+        return store_object(repo, "commit", "".join(lines).encode())
+
+    with tempdir("deep-graph") as root:
+        repo = root / "merge"
+        repo.mkdir()
+        mgit(repo, "init")
+        empty_tree = store_object(repo, "tree", b"")
+
+        base = commit(repo, empty_tree, [], "base")
+        ours = base
+        for i in range(1105):
+            ours = commit(repo, empty_tree, [ours], f"ours-{i}")
+        side = commit(repo, empty_tree, [base], "side")
+
+        write(repo / ".git" / "refs" / "heads" / "master", ours + "\n")
+        write(repo / ".git" / "refs" / "heads" / "side", side + "\n")
+        mgit(repo, "merge", "side")
+        parents = out(git(repo, "rev-list", "--parents", "-n", "1", "HEAD")).split()
+        check(len(parents) == 3 and parents[1] == ours and parents[2] == side,
+              "merge-base traversal remains correct beyond 1000 commits")
+
+        # Commit parsing must preserve every parent of an octopus merge.
+        roots = [commit(repo, empty_tree, [], f"root-{i}") for i in range(20)]
+        octopus = commit(repo, empty_tree, roots, "octopus")
+        write(repo / ".git" / "refs" / "heads" / "master", octopus + "\n")
+        log = text(mgit(repo, "log", "-n", "1"))
+        check(all(p[:7] in log for p in roots),
+              "commit parser preserves more than 16 parents")
+
+        # Local-path fetch used to silently stop walking after 1000 commits.
+        src = root / "src"
+        dst = root / "dst"
+        src.mkdir()
+        dst.mkdir()
+        mgit(src, "init")
+        src_tree = store_object(src, "tree", b"")
+        tip = commit(src, src_tree, [], "root")
+        for i in range(1105):
+            tip = commit(src, src_tree, [tip], f"c-{i}")
+        write(src / ".git" / "refs" / "heads" / "master", tip + "\n")
+
+        mgit(dst, "init")
+        mgit(dst, "remote", "add", "origin", str(src))
+        mgit(dst, "fetch", "origin")
+        count = int(out(git(dst, "rev-list", "--count",
+                            "refs/remotes/origin/master")).strip())
+        check(count == 1106,
+              "local fetch transfers complete history beyond 1000 commits")
+        git(dst, "fsck", "--full")
+        check(True, "real Git validates deep local-fetch object closure")
+
 
 
 def test_mainline() -> None:
@@ -798,7 +983,9 @@ TESTS = {
     "rebase": test_rebase,
     "reset": test_reset,
     "dogfood": test_dogfood,
+    "abbrev": test_abbrev,
     "integrity": test_integrity,
+    "deep-graph": test_deep_graph,
     "mainline": test_mainline,
     "merge": test_merge,
     "stash": test_stash,
