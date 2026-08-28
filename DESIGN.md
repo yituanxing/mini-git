@@ -8,7 +8,7 @@
 1. [Git 核心思想](#一git-核心思想) —— 理解本项目前必须理解的东西
 2. [代码架构](#二代码架构) —— 目录、模块、分层、关键数据结构
 3. [命令清单](#三命令清单与参数支持) —— 每个命令支持什么、与真实 git 的差异
-4. [扩展指南](#四扩展指南想加新功能看这里) —— 加命令/加功能/改架构的具体路线
+4. [维护原则](#四扩展指南想加新功能看这里) —— 如何在不教错 Git 的前提下改代码
 
 ---
 
@@ -221,9 +221,9 @@ make test
 | `branch` | `mgit branch [<名字> \| -d <名字>]` | 无 `-a`（远端分支列表）、无 `-m` 改名 |
 | `checkout` | `mgit checkout <分支或提交>`、`mgit checkout -b <新分支>` | 支持 detached HEAD；无 `-- <文件>` 单文件恢复 |
 | `reset` | `mgit reset [--soft|--mixed|--hard] <哈希>` | 默认 `--mixed`，三模式与真实 Git 的三棵树语义一致；无路径级 reset |
-| `revert` | `mgit revert <提交>` | 无 `--no-commit` |
+| `revert` | `mgit revert <提交>` | 无 `--no-commit`；merge commit 因未实现 `-m` mainline 而明确拒绝 |
 | `tag` | `mgit tag [<名字> \| -l \| -d <名字>]` | **只有轻量标签**，不支持 `-a`/`-m` 附注标签 |
-| `stash` | `mgit stash [push\|pop\|list\|drop]` | `drop` 只删最近一条，无编号参数；无 `apply`/`show` |
+| `stash` | `mgit stash [push\|pop\|list\|drop]` | 默认保存 tracked 修改/删除且忽略 untracked；内部 stash 存储是教学简化，不复刻真实 refs/stash reflog/commit 图 |
 | `reflog` | `mgit reflog [show]` | 无过期清理、无按引用查看 |
 | `gc` | `mgit gc` | 打包为全量对象（无发送端风格的 delta 压缩） |
 | `count-objects` | `mgit count-objects [-v]` | — |
@@ -279,8 +279,8 @@ make test
    ```
 2. `src/main.c` 注册表加一行 `&cmd_show,`；
 3. `Makefile` 的 `SRCS` 加一行；
-4. `tests/` 写一个 `test_show.ps1`，并在 `tests/run_all.ps1` 的
-   数组里注册。
+4. 在 `tests/run_all.py` 增加最小 Python 回归，并尽量用真实 Git
+   作为行为 oracle。
 
 命令实现里反复用到的"积木"：
 
@@ -312,23 +312,21 @@ make test
 - 升级协议 v2 的切入点：`http.c` 请求加 `Git-Protocol: version=2` 头，
   `transport.c` 广告解析改走 v2 的 capability/ref 分段格式。
 
-### 4.4 值得做的进阶题（按性价比排序）
+### 4.4 当前刻意保持的教学简化
 
-1. **发送端 delta 压缩**（性价比最高）：目前 `pack_build_memory` 全量
-   存每个对象。思路：对同类型、大小接近的对象做滑动窗口找相似段，
-   记"复制/插入"指令。真实 git 靠这个把仓库体积压小一个数量级。
-   读端已支持（解包时能处理 ofs-delta），写的参考在 `pack.c` 的
-   `MAX_DELTA_DEPTH` 附近。
-2. **`push --force`**：跳过 `push_to_url` 里的快进检查，把指令的
-   `old` 哈希照发即可。半小时的活，建议先想清楚为什么真实世界怕它。
-3. **多分支推送**：`transport_push_refs` 本来就接受指令数组，命令层
-   循环收集即可；难点只在"哪些分支该推"的策略。
-4. **凭据库对接**：`http.c` 收到 401 时调用真实 `git credential fill`
-   取已存凭据重试，避免把令牌写进 URL。
-5. **多轮 fetch 协商**：当前一次 have 往返，服务器可能多传对象；
-   按 multi_ack 协议迭代到服务器回 `ACK ... common` 为止。
-6. **`reset --mixed` / checkout 任意提交**（detached HEAD）：
-   HEAD 支持直接存哈希（`ref.c` 已兼容），命令层解开限制即可。
+当前阶段不继续横向扩功能。以下差异应理解为“明确的教学边界”，而不是
+等待补齐的产品 backlog：
+
+- stash 保留高层 push/pop/list/drop 语义，但不复制真实 Git 的 stash
+  merge-commit/reflog 内部结构；
+- merge/cherry-pick 冲突不实现真实 Index 的 stage 1/2/3 全套状态机；
+- cherry-pick/revert 不实现 merge commit 的 `-m/--mainline`，因此明确拒绝，
+  而不是猜一个 parent；
+- pull 固定采用 fetch + merge，不实现配置驱动的 rebase/ff-only 策略；
+- protocol v2、SSH、LFS、submodule 等不属于当前教学主线。
+
+如果以后要扩展，也必须先回答：**它是否能显著帮助理解 Git？**
+不能的话，不因为“真实 Git 有”就实现。
 
 ### 4.5 改动任何核心逻辑后的验证清单
 
