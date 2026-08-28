@@ -7,7 +7,7 @@
  * 引用管理
  * 
  * Git 的引用系统：
- * - HEAD: 指向当前分支的符号引用
+ * - HEAD: 通常是指向当前分支的符号引用；detached 时直接存 commit hash
  * - refs/heads/xxx: 分支，存储 commit hash
  * - refs/tags/xxx: 标签，存储 commit hash
  * 
@@ -77,6 +77,9 @@ int ref_delete_branch(RefManager *mgr, const char *name);
  * @param name  分支名（不含 refs/heads/ 前缀）
  */
 int ref_set_head(RefManager *mgr, const char *name);
+
+/* 设置 detached HEAD：HEAD 文件直接保存 commit hash。 */
+int ref_set_head_detached(RefManager *mgr, const Hash *hash);
 
 /*
  * 列出所有分支

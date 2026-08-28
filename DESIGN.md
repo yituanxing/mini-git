@@ -1,13 +1,14 @@
 # mgit 设计文档
 
-> mgit（mini-git）：一个用 C 语言从零实现的 Git，目标是与真实 Git **双向兼容**。
-> 定位：教学项目 + 可用的单人/小团队版本控制工具。
+> mgit（mini-git）：一个用 C 语言从零实现、可与真实 Git 互操作的教学 Git。
+> 定位：把常见 Git 概念和面试知识变成可运行、可调试、可读源码的实现；
+> 在不牺牲可读性的前提下保留足够的实际使用能力。
 
 本文档分四部分：
 1. [Git 核心思想](#一git-核心思想) —— 理解本项目前必须理解的东西
 2. [代码架构](#二代码架构) —— 目录、模块、分层、关键数据结构
 3. [命令清单](#三命令清单与参数支持) —— 每个命令支持什么、与真实 git 的差异
-4. [扩展指南](#四扩展指南想加新功能看这里) —— 加命令/加功能/改架构的具体路线
+4. [维护原则](#四扩展指南想加新功能看这里) —— 如何在不教错 Git 的前提下改代码
 
 ---
 
@@ -21,7 +22,7 @@ Git 的本质是一个**以 SHA-1 哈希为键的对象数据库**。任何内�
 （文件、目录、提交）写入前，先算出它的内容哈希，哈希就是它的"地址"。
 
 - 内容相同 ⇒ 哈希相同 ⇒ 只存一份（天然去重）
-- 内容变一个字节 ⇒ 哈希完全不同（天然防篡改）
+- 内容变一个字节 ⇒ 对象 ID 随之改变（内容寻址能暴露内容不一致，但 SHA-1 不是现代安全防篡改机制）
 - 对象之间**只通过哈希互相引用**，没有文件名、没有路径硬编码
 
 对象存储布局（本项目与真实 git 完全一致）：
@@ -42,7 +43,7 @@ Git 的本质是一个**以 SHA-1 哈希为键的对象数据库**。任何内�
 | `blob` | 文件内容（不含文件名！） | 一张"文件内容快照" |
 | `tree` | 若干 `<模式> <名字>\0<哈希>` 条目 | 目录清单：谁叫什么名、指向哪个 blob/子 tree |
 | `commit` | tree 哈希 + 父提交哈希 + 作者/时间 + 消息 | 一次"存档"，指着一个目录快照，串着历史 |
-| `tag` | 指向某对象的哈希 + 标签信息 | 本项目只用轻量标签（见命令差异） |
+| `tag` | 指向某对象的哈希 + 标签信息 | 这是 **annotated tag object**；mgit 当前只创建 lightweight tag，因此不会创建这种对象 |
 
 关键推论：**提交记录的是整个项目的目录快照（通过 tree），不是差异**。
 "两个版本的差别"是运行时对比两棵 tree 算出来的，存储里没有"修改记录"这种东西。
@@ -56,20 +57,22 @@ Git 的本质是一个**以 SHA-1 哈希为键的对象数据库**。任何内�
 Index (.git/index，暂存区：下次提交要包含的文件清单)
    │  commit  (把 index 固化成 tree + commit 对象)
    ▼
-对象库 (.git/objects/，永远只增不减的归档)
+对象库 (.git/objects/，保存不可变对象；存储可被 gc 打包/清理)
    ▲
 引用 (.git/refs/ + HEAD：可移动的"标签"，指向某个对象哈希)
 ```
 
 - **分支** = `refs/heads/<名字>` 文件里的一行哈希。移动分支 = 改一个文件。
-- **HEAD** = 指向当前分支的引用（符号引用）。
-- `reset`/`rebase`/`merge` 全都是在"移动引用"，对象从不被删除。
+- **HEAD** 通常是指向当前分支的符号引用；detached HEAD 时直接保存 commit 哈希。
+- **reset** 的核心是移动 HEAD/分支，并按模式决定是否同步 Index 和工作区。
+- **rebase** 会把一串提交的改动重放到新基底上，生成新的 commit，再移动分支。
+- **merge** 若能 fast-forward 只移动分支；否则会创建一个新的多父 commit。
 
 ### 1.4 不可变与可达性
 
-对象一旦写入永不修改（改了内容哈希就变了）。"删除提交"实际是：
-移动引用让它不可达，再由 `gc` 回收。本项目 `gc` 就是从所有引用出发
-遍历可达对象，打包后清掉不可达的。
+对象内容一旦写入就不原地修改；内容变化会产生新的对象 ID。所谓"删除提交"
+通常只是让引用不再指向它，使它变成不可达对象。真实 Git 还会考虑 reflog、
+过期时间等保留策略；mgit 的 gc 为教学简化，按自己的可达性规则处理对象。
 
 ### 1.5 分布式 = 对象库的差集同步
 
@@ -96,25 +99,28 @@ src/
 │   ├── hash.*      # SHA-1 实现（自写，不依赖 OpenSSL）
 │   ├── zlib_util.* # zlib 压缩/解压封装
 │   ├── file.*      # 文件读写、路径拼接、目录创建
-│   ├── http.*      # WinHTTP 封装：GET/POST、URL 解析、Basic 认证
+│   ├── http.*      # Windows WinHTTP 后端
+│   ├── http_curl.c # Linux libcurl 后端；二者共用 http.h 接口
 │   └── error.h     # mgit_error 统一错误输出
 ├── core/           # git 领域核心：对象模型 + 协议
 │   ├── object.*    # 松散对象读写（类型校验、按哈希前缀查找）
 │   ├── ref.*       # refs/HEAD 管理 + packed-refs 读取
 │   ├── tree.*      # tree 解析/序列化/递归展开
 │   ├── commit.*    # commit 解析/生成
-│   ├── index.*     # index v2 读写 + write-tree（含路径排序）
+│   ├── graph.*     # commit DAG 的共享祖先判断（动态遍历）
+│   ├── index.*     # index v2 读写 + write-tree（含 checksum / 路径排序）
 │   ├── linemerge.* # 行级三路合并（merge 冲突处理的核心算法）
 │   ├── ignore.*    # .gitignore 规则匹配
 │   ├── remote.*    # .git/config 中 remote 配置读写
 │   ├── pack.*      # pack 写出（gc/push）+ 解包（clone/fetch，含 ofs-delta）
 │   ├── pack_index.*# .idx v2 解析
 │   └── transport.* # Git Smart HTTP 客户端（广告解析/协商/推送回执）
-└── commands/       # 28 个命令，每个一个文件，只编排不实现算法
+└── commands/       # 28 个命令，每个一个文件；保留可读的命令流程
 ```
 
-**分层纪律**：`commands → core → base`，单向依赖。命令文件里只允许
-"调用 core 的 API 编排流程"，算法（合并、解析、协商）一律下沉到 core。
+**分层纪律**：整体保持 `commands → core → base` 的单向依赖。
+底层格式、对象模型、协议 primitive 放在 core/base；命令层允许保留有教学价值的
+流程编排（例如 rebase 如何逐个重放提交），避免为了抽象而把 Git 原理藏起来。
 
 ### 2.2 核心数据结构
 
@@ -145,7 +151,7 @@ mgit push           cmd_push.c   → 广告对比 → 收集差集对象 → pac
 ### 2.4 网络协议实现要点（Smart HTTP, protocol v0）
 
 三种操作共用同一个积木：`transport_get_refs_service`（GET 广告）+
-pkt-line 帧构造/解析 + WinHTTP POST。
+pkt-line 帧构造/解析 + 平台 HTTP 后端 POST（Windows=WinHTTP，Linux=libcurl）。
 
 | 操作 | 端点 | 请求体 | 响应 |
 |---|---|---|---|
@@ -175,19 +181,26 @@ pkt-line 帧构造/解析 + WinHTTP POST。
 
 ### 2.5 构建与测试
 
+Windows / MinGW：
 ```
-mingw32-make          # 编译（-Wall -Wextra -std=c99，依赖 zlib + winhttp）
-mingw32-make test     # 全量回归：17 个 PowerShell 套件、400+ 断言
-powershell -File tests\test_netpush.ps1   # 单跑一个套件
+mingw32-make
+mingw32-make test
 ```
 
-测试基建：
-- `tests/git_http_server.py`：本地 CGI 服务器，包装真实 `git http-backend`，
-  网络套件用它起真服务器（不是 mock，服务器行为就是真实 git 的行为）。
-- 每个测试脚本建时间戳目录、结尾自清理（`.git` 对象只读，清理前需
-  `attrib -r`）；沙箱环境删不掉时，用管理员权限跑 `tests/cleanup_tmp.ps1`。
-- 兼容性验证原则：mgit 产物必须能被真实 `git clone` / `git fsck` /
-  `git cat-file` 验证通过，反之亦然。
+Linux：
+```
+make
+make test
+```
+
+`make test` / `mingw32-make test` 都运行同一份 Python 标准库测试
+`tests/run_all.py`。迁移期间 Windows 还保留旧 PowerShell 套件作为回归保险。
+测试原则：
+- 本地和 CI 调用同一套 Python 测试合同；
+- `tests/git_http_server.py` 包装真实 `git http-backend`，网络测试不是 mock；
+- 涉及对象、Index、refs、网络等兼容语义时，让真实 Git 作为 oracle，
+  用 `git fsck` / `git cat-file` / `git diff` 等交叉验证；
+- Windows 和 Linux CI 分别验证 MinGW+WinHTTP 与 GCC+libcurl。
 
 ---
 
@@ -204,14 +217,14 @@ powershell -File tests\test_netpush.ps1   # 单跑一个套件
 | `add` | `mgit add <文件>... \| . \| -A` | 无 `-u`（只更新已跟踪）、无 `-p` |
 | `commit` | `mgit commit -m <消息> [-a] [--amend]` | **`-m` 必填**，没有编辑器交互；无 `--author` 等 |
 | `status` | `mgit status` | 输出格式简化；无 `-s` 等选项 |
-| `log` | `mgit log [--oneline] [-n N] [分支]` | 无 `--graph`、范围语法（`a..b`）、`-p` |
+| `log` | `mgit log [--oneline] [-n N] [分支]` | 遍历所有可达 parent，但显示顺序是简化 BFS，不等同于真实 Git 完整的 revision ordering；无 `--graph`/范围语法/`-p` |
 | `diff` | `mgit diff [--cached] [<tree> [<tree>]]` | 两个哈希时比较两棵 tree；无文件过滤参数 |
 | `branch` | `mgit branch [<名字> \| -d <名字>]` | 无 `-a`（远端分支列表）、无 `-m` 改名 |
-| `checkout` | `mgit checkout <分支>`、`mgit checkout -b <新分支>` | 不能直接检出任意提交哈希（无 detached HEAD）；无 `-- <文件>` 单文件恢复 |
-| `reset` | `mgit reset [--hard] <哈希>` | **默认模式只移动分支指针**（近似真实 `--soft`），不动 Index/工作区；不支持显式 `--soft`/`--mixed` |
-| `revert` | `mgit revert <提交>` | 无 `--no-commit` |
-| `tag` | `mgit tag [<名字> \| -l \| -d <名字>]` | **只有轻量标签**，不支持 `-a`/`-m` 附注标签 |
-| `stash` | `mgit stash [push\|pop\|list\|drop]` | `drop` 只删最近一条，无编号参数；无 `apply`/`show` |
+| `checkout` | `mgit checkout <分支或提交>`、`mgit checkout -b <新分支>` | 支持 detached HEAD；为避免整棵恢复覆盖数据，mgit 要求 tracked Index/Working Tree 干净（比真实 Git 更保守）；无单文件恢复 |
+| `reset` | `mgit reset [--soft|--mixed|--hard] <哈希>` | 默认 `--mixed`，三模式与真实 Git 的三棵树语义一致；无路径级 reset |
+| `revert` | `mgit revert <提交>` | 无 `--no-commit`；merge commit 因未实现 `-m` mainline 而明确拒绝 |
+| `tag` | `mgit tag [<名字> \| -l \| -d <名字>]` | **只有 lightweight tag**：`refs/tags/name → commit`，不会创建 tag object；不支持 annotated tag |
+| `stash` | `mgit stash [push\|pop\|list\|drop]` | 默认保存 tracked 修改/删除且忽略 untracked；内部 stash 存储是教学简化，不复刻真实 refs/stash reflog/commit 图 |
 | `reflog` | `mgit reflog [show]` | 无过期清理、无按引用查看 |
 | `gc` | `mgit gc` | 打包为全量对象（无发送端风格的 delta 压缩） |
 | `count-objects` | `mgit count-objects [-v]` | — |
@@ -220,12 +233,12 @@ powershell -File tests\test_netpush.ps1   # 单跑一个套件
 
 | 命令 | 支持的形式 | 与真实 git 的差异 |
 |---|---|---|
-| `merge` | `mgit merge <分支>` | 无 `--no-ff`/`--squash`；冲突策略为行级三路合并 |
-| `cherry-pick` | `mgit cherry-pick <提交>` | 一次一个提交，无范围语法 |
-| `rebase` | `mgit rebase <分支>` / `--continue` / `--abort` | 无 `-i` 交互式、无 `--onto` |
-| `pull` | `mgit pull [<remote>] [<分支>]` | = fetch + merge；无 `--rebase` 模式 |
+| `merge` | `mgit merge <分支>` | FF 与双亲 merge 语义正确；为保护数据要求 tracked 状态干净（比真实 Git 更保守）；冲突策略为简化行级三路合并 |
+| `cherry-pick` | `mgit cherry-pick <提交>` | 一次一个提交；无 sequencer/`--continue`；merge commit 因未实现 `-m` mainline 而明确拒绝 |
+| `rebase` | `mgit rebase <分支>` / `--continue` / `--abort` | 教学版只重放**线性本地历史**；detached HEAD 和含 merge commit 的本地历史明确拒绝；无 `-i`/`--onto`/`--rebase-merges` |
+| `pull` | `mgit pull [<remote>] [<分支>]` | 真实 Git 是 fetch + integrate；mgit 固定选择 merge 作为 integrate 策略 |
 | `fetch` | `mgit fetch [<remote>]` | 单轮协商（一次 have 往返），不做多轮收敛 |
-| `push` | `mgit push [<remote>] [<分支>]` | **一次一个分支**；无 `--force`、无 `-u`、无标签推送；非快进直接拒绝 |
+| `push` | `mgit push [-f|--force] [<remote>] [<分支>]` | **一次一个分支**；无 `-u`、无标签推送；默认拒绝非快进 |
 | `clone` | `mgit clone <路径或URL> [目录]` | 无 `--depth`/`--branch`/`--bare` |
 | `remote` | `mgit remote [-v]` / `add <名> <地址>` / `remove <名>` | **没有 `set-url`**；地址可以是本地路径或 http(s) URL |
 
@@ -244,49 +257,40 @@ powershell -File tests\test_netpush.ps1   # 单跑一个套件
 | 功能 | 不做的原因 |
 |---|---|
 | 交互式命令（编辑器、进度条交互） | 教学项目聚焦数据结构与协议 |
-| `--force` 推送 | 危险操作，且实现上只是跳过快进检查，留作练习题 |
+| 更完整的 push 策略（多 ref、upstream 等） | 会增加工程复杂度，不帮助当前教学主线 |
 | 协议 v2 / SSH | v0 已能覆盖全部互通需求 |
 | 子模块 / 稀疏检出 / LFS | 与核心原理无关的上层功能 |
-| 发送端 delta 压缩 | 唯一"值得做的进阶题"，见扩展指南 |
+| 发送端更复杂的 delta 压缩 | 当前教学目标不需要，保持现实现即可 |
 
 ---
 
-## 四、扩展指南：想加新功能看这里
+## 四、维护原则
 
-### 4.1 加一个新命令（最简路径，约 15 分钟）
+### 4.1 当前维护方向
 
-以假想的 `mgit show` 为例：
+当前阶段**冻结横向功能扩展**。维护优先级只有三类：
 
-1. 新建 `src/commands/cmd_show.c`，照着最小的命令（如
-   [cmd_write_tree.c](src/commands/cmd_write_tree.c)，114 行）抄骨架：
-   ```c
-   static void show_help(void) { printf("usage: ..."); }
-   static int show_run(int argc, char **argv) { /* 编排流程 */ }
-   Command cmd_show = { .name = "show", .description = "...",
-                        .run = show_run, .help = show_help };
-   ```
-2. `src/main.c` 注册表加一行 `&cmd_show,`；
-3. `Makefile` 的 `SRCS` 加一行；
-4. `tests/` 写一个 `test_show.ps1`，并在 `tests/run_all.ps1` 的
-   数组里注册。
+1. 会把 Git 核心概念教错的行为；
+2. 会破坏 Git 格式/互操作的不变量；
+3. 能用更少、更清晰代码消除同一概念的重复实现。
 
-命令实现里反复用到的"积木"：
+常用基础积木：
 
 | 想做什么 | 用什么 |
 |---|---|
 | 解析一个引用/分支名到哈希 | `ref_resolve*`（ref.h） |
 | 读对象 | `object_store_read` → 按 `obj.type` 分派 |
 | 解析提交 | `commit_parse` / `commit_free` |
-| 遍历目录 | `tree_parse` + `tree_flatten`（递归展开） |
-| 找共同祖先 | `commit_is_ancestor` / 三路合并见 merge |
+| 遍历目录 | `tree_parse` + `tree_flatten` |
+| 判断 commit 祖先关系 | `graph_is_ancestor`（graph.h） |
 | 读写暂存区 | `index_open` / `index_write` |
 
-### 4.2 给现有功能加参数（如 `reset --soft`）
+### 4.2 改现有命令时的原则
 
-路线固定：**解析参数 → 在既有流程上分叉 → 补测试断言**。
-例如加 `reset --soft`：`cmd_reset.c` 的 `reset_run` 参数循环里识别
-`--soft`，其语义恰好就是当前默认行为——把默认行为改成 `--mixed`
-（重置 Index）反而更接近真实 git，这是一道不错的改造题。
+优先保证 Git 概念正确，而不是继续扩参数数量。路线是：
+**先用真实 Git 明确语义 → 写最小回归 → 修改实现 → Windows/Linux 同测**。
+例如 `diff` 要守住 Working Tree↔Index / Index↔HEAD 两个边界，
+`reset` 要守住 soft/mixed/hard 三棵树，而不是只追求“命令能跑”。
 
 ### 4.3 改协议 / 网络层
 
@@ -297,32 +301,29 @@ powershell -File tests\test_netpush.ps1   # 单跑一个套件
   2. Python 原样构造请求体，确认"协议本身的理解"对不对；
   3. 转储 mgit 实际发出的字节（临时 `fwrite` 到文件），与期望逐字节比；
   4. 绕过封装直连 `git http-backend` 看服务端 stderr。
-- 升级协议 v2 的切入点：`http.c` 请求加 `Git-Protocol: version=2` 头，
-  `transport.c` 广告解析改走 v2 的 capability/ref 分段格式。
+- protocol v2 不属于当前教学目标；这里不作为待办项。
 
-### 4.4 值得做的进阶题（按性价比排序）
+### 4.4 当前刻意保持的教学简化
 
-1. **发送端 delta 压缩**（性价比最高）：目前 `pack_build_memory` 全量
-   存每个对象。思路：对同类型、大小接近的对象做滑动窗口找相似段，
-   记"复制/插入"指令。真实 git 靠这个把仓库体积压小一个数量级。
-   读端已支持（解包时能处理 ofs-delta），写的参考在 `pack.c` 的
-   `MAX_DELTA_DEPTH` 附近。
-2. **`push --force`**：跳过 `push_to_url` 里的快进检查，把指令的
-   `old` 哈希照发即可。半小时的活，建议先想清楚为什么真实世界怕它。
-3. **多分支推送**：`transport_push_refs` 本来就接受指令数组，命令层
-   循环收集即可；难点只在"哪些分支该推"的策略。
-4. **凭据库对接**：`http.c` 收到 401 时调用真实 `git credential fill`
-   取已存凭据重试，避免把令牌写进 URL。
-5. **多轮 fetch 协商**：当前一次 have 往返，服务器可能多传对象；
-   按 multi_ack 协议迭代到服务器回 `ACK ... common` 为止。
-6. **`reset --mixed` / checkout 任意提交**（detached HEAD）：
-   HEAD 支持直接存哈希（`ref.c` 已兼容），命令层解开限制即可。
+当前阶段不继续横向扩功能。以下差异应理解为“明确的教学边界”，而不是
+等待补齐的产品 backlog：
+
+- stash 保留高层 push/pop/list/drop 语义，但不复制真实 Git 的 stash
+  merge-commit/reflog 内部结构；
+- merge/cherry-pick 冲突不实现真实 Index 的 stage 1/2/3 全套状态机；
+- cherry-pick/revert 不实现 merge commit 的 `-m/--mainline`，因此明确拒绝，
+  而不是猜一个 parent；
+- pull 固定采用 fetch + merge，不实现配置驱动的 rebase/ff-only 策略；
+- protocol v2、SSH、LFS、submodule 等不属于当前教学主线。
+
+如果以后要扩展，也必须先回答：**它是否能显著帮助理解 Git？**
+不能的话，不因为“真实 Git 有”就实现。
 
 ### 4.5 改动任何核心逻辑后的验证清单
 
-1. `mingw32-make` 零警告；
-2. `mingw32-make test` 17 套件全绿；
+1. 当前平台 clean build 通过；
+2. 共享 Python 测试全绿，Windows/Linux CI 都通过；
 3. 涉及存储格式的：把产物丢给真实 `git fsck` / `git log` 验证；
 4. 涉及网络的：本地 `git_http_server.py` 起真服务器端到端跑一遍；
-5. 边界场景：**超过固定容量、空输入、重复执行**三种都要试
-   （本项目三个历史 bug 分别栽在这三类上）。
+5. 边界场景重点看：**超过固定容量、空输入、重复执行**。
+   commit DAG 的共享祖先遍历已经改为动态结构，新增代码不要重新引入静默固定上限。

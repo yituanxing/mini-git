@@ -61,7 +61,12 @@ def out(p: subprocess.CompletedProcess) -> str:
 
 
 def mgit(cwd: Path | str, *args: str, check_rc: bool = True):
-    return run([MGIT, *args], cwd=cwd, check_rc=check_rc)
+    p = run([MGIT, *args], cwd=cwd, check_rc=check_rc)
+    # Real Git is our oracle. Disable platform newline conversion so oracle
+    # operations do not mutate bytes behind mgit's back on Windows.
+    if args and args[0] == "init" and p.returncode == 0:
+        run([GIT, "config", "core.autocrlf", "false"], cwd=cwd, check_rc=True)
+    return p
 
 
 def git(cwd: Path | str, *args: str, check_rc: bool = True):

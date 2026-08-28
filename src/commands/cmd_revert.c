@@ -129,6 +129,19 @@ static int revert_run(int argc, char **argv) {
         return -1;
     }
 
+    /*
+     * merge commit 有多个 parent，revert 必须先选择 mainline。
+     * 真实 Git 用 -m/--mainline；mgit 不实现该选项，因此不能猜 parents[0]。
+     */
+    if (target.parent_count > 1) {
+        mgit_error("cannot revert a merge commit without a mainline parent");
+        mgit_error("mgit does not implement revert -m");
+        commit_free(&target);
+        ref_manager_close(refs);
+        object_store_close(store);
+        return -1;
+    }
+
     if (target.parent_count == 0) {
         mgit_error("cannot revert initial commit (no parent to compare against)");
         commit_free(&target);

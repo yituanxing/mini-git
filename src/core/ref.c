@@ -266,6 +266,15 @@ int ref_set_head(RefManager *mgr, const char *name) {
     return file_write_line(path, content);
 }
 
+int ref_set_head_detached(RefManager *mgr, const Hash *hash) {
+    char path[1024];
+    path_join(path, sizeof(path), mgr->git_dir, "HEAD");
+
+    char hex[HASH_HEX_SIZE];
+    hash_to_hex(hash, hex);
+    return file_write_line(path, hex);
+}
+
 /*
  * 列出所有分支
  * 遍历 refs/heads/ 目录下的所有文件

@@ -5,6 +5,7 @@
 #include "../core/ref.h"
 #include "../core/index.h"
 #include "../base/hash.h"
+#include "../base/file.h"
 #include "../base/error.h"
 
 #include <stdio.h>
@@ -17,10 +18,13 @@
  * 比较差异
  * 
  * 支持:
- * - mgit diff                    比较 HEAD 与其 parent
- * - mgit diff --cached           比较 Index（暂存区）与 HEAD
- * - mgit diff <tree-hash>        比较指定 tree 与 HEAD
- * - mgit diff <tree1> <tree2>    比较两棵 tree
+ * - mgit diff                    比较工作区与 Index（未暂存变更）
+ * - mgit diff --cached           比较 Index 与 HEAD（已暂存变更）
+ * - mgit diff <tree-hash>        教学/调试：比较指定 tree 与 HEAD
+ * - mgit diff <tree1> <tree2>    教学/调试：比较两棵 tree
+ *
+ * 三区模型：
+ *   Working Tree --(git diff)--> Index --(git diff --cached)--> HEAD
  */
 
 static void diff_help(void) {
@@ -185,6 +189,37 @@ static int diff_cached(ObjectStore *store, RefManager *refs) {
     return 0;
 }
 
+/* 无参数：比较工作区与 Index。未跟踪文件不属于 Index，因此不显示。 */
+static int diff_worktree(Index *idx) {
+    int changes = 0;
+
+    for (size_t i = 0; i < idx->count; i++) {
+        IndexEntry *entry = &idx->entries[i];
+        uint8_t *data = NULL;
+        size_t size = 0;
+
+        if (file_read_all(entry->name, &data, &size) != 0) {
+            printf("- %s (deleted)\n", entry->name);
+            changes++;
+            continue;
+        }
+
+        Hash worktree_hash;
+        object_hash(OBJ_BLOB, data, size, &worktree_hash);
+        free(data);
+
+        if (!hash_equal(&worktree_hash, &entry->hash)) {
+            printf("~ %s (modified)\n", entry->name);
+            changes++;
+        }
+    }
+
+    if (changes == 0) {
+        printf("(no unstaged changes)\n");
+    }
+    return 0;
+}
+
 static int diff_run(int argc, char **argv) {
     int cached = 0;
     const char *hash_args[2] = {NULL, NULL};
@@ -255,74 +290,14 @@ static int diff_run(int argc, char **argv) {
             }
         }
     } else {
-        /* 无参数：比较 HEAD 与其 parent */
-        Hash head_hash;
-        if (ref_resolve_head(refs, &head_hash) != 0) {
-            mgit_error("no commits yet");
+        /* 无参数：真实 Git 的核心语义是 Working Tree vs Index。 */
+        Index *idx = index_open(".git");
+        if (!idx) {
+            mgit_error("cannot open index");
             ret = -1;
         } else {
-            Object obj;
-            memset(&obj, 0, sizeof(obj));
-            if (object_store_read(store, &head_hash, &obj) != 0) {
-                mgit_error("cannot read HEAD commit");
-                ret = -1;
-            } else if (obj.type != OBJ_COMMIT) {
-                mgit_error("cannot read HEAD commit");
-                object_free(&obj);
-                ret = -1;
-            } else {
-                Commit commit;
-                memset(&commit, 0, sizeof(commit));
-                commit_parse(obj.data, obj.size, &commit);
-                object_free(&obj);
-
-                if (commit.parent_count == 0) {
-                    printf("Initial commit - all files are new:\n");
-                    Object tree_obj;
-                    memset(&tree_obj, 0, sizeof(tree_obj));
-                    if (object_store_read(store, &commit.tree, &tree_obj) == 0) {
-                        if (tree_obj.type == OBJ_TREE) {
-                            Tree tree = {0};
-                            tree_parse(tree_obj.data, tree_obj.size, &tree);
-                            TreeFlatEntry *flat = NULL;
-                            size_t fc = 0;
-                            tree_flatten(store, &tree, &flat, &fc);
-                            for (size_t i = 0; i < fc; i++) {
-                                printf("+ %s (new)\n", flat[i].path);
-                            }
-                            if (fc == 0) printf("(empty tree)\n");
-                            free(flat);
-                            tree_free(&tree);
-                        }
-                        object_free(&tree_obj);
-                    }
-                } else {
-                    Object parent_obj;
-                    memset(&parent_obj, 0, sizeof(parent_obj));
-                    if (object_store_read(store, &commit.parents[0], &parent_obj) != 0) {
-                        mgit_error("cannot read parent commit");
-                        ret = -1;
-                    } else if (parent_obj.type != OBJ_COMMIT) {
-                        mgit_error("cannot read parent commit");
-                        object_free(&parent_obj);
-                        ret = -1;
-                    } else {
-                        Commit parent;
-                        memset(&parent, 0, sizeof(parent));
-                        commit_parse(parent_obj.data, parent_obj.size, &parent);
-                        object_free(&parent_obj);
-
-                        char hex1[HASH_HEX_SIZE], hex2[HASH_HEX_SIZE];
-                        hash_to_hex(&parent.tree, hex1);
-                        hash_to_hex(&commit.tree, hex2);
-                        printf("diff %s..%s\n", hex1 + 7, hex2 + 7);
-
-                        ret = diff_trees(store, &parent.tree, &commit.tree);
-                        commit_free(&parent);
-                    }
-                }
-                commit_free(&commit);
-            }
+            ret = diff_worktree(idx);
+            index_close(idx);
         }
     }
 

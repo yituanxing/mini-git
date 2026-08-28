@@ -23,7 +23,7 @@ static void commit_tree_help(void) {
     printf("usage: mgit commit-tree <tree> [-p <parent>] [-m <message>]\n\n");
     printf("Create a commit object from a tree.\n\n");
     printf("Options:\n");
-    printf("    -p <parent>     Parent commit hash (can be specified multiple times)\n");
+    printf("    -p <parent>     Parent commit hash (one parent in mgit)\n");
     printf("    -m <message>    Commit message\n");
 }
 
@@ -35,6 +35,11 @@ static int commit_tree_run(int argc, char **argv) {
     /* 解析参数 */
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-p") == 0 && i + 1 < argc) {
+            if (parent_str) {
+                mgit_error("mgit commit-tree supports one -p parent");
+                mgit_error("merge commits with multiple parents are created by mgit merge");
+                return -1;
+            }
             parent_str = argv[++i];
         } else if (strcmp(argv[i], "-m") == 0 && i + 1 < argc) {
             message = argv[++i];

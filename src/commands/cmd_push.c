@@ -1,6 +1,7 @@
 #include "../command.h"
 #include "../core/object.h"
 #include "../core/commit.h"
+#include "../core/graph.h"
 #include "../core/tree.h"
 #include "../core/ref.h"
 #include "../core/remote.h"
@@ -40,38 +41,6 @@ static void push_help(void) {
 /* 判断是否为网络 URL */
 static int is_url(const char *s) {
     return strncmp(s, "http://", 7) == 0 || strncmp(s, "https://", 8) == 0;
-}
-
-/* BFS 检查 target 是否在 start 的历史中（本地对象库） */
-static int commit_is_ancestor(ObjectStore *store, const Hash *target,
-                              const Hash *start) {
-    if (hash_equal(target, start)) return 1;
-    Hash queue[1000];
-    int head = 0, tail = 0;
-    queue[tail++] = *start;
-
-    while (head < tail && head < 999) {
-        Hash cur = queue[head++];
-        Object obj;
-        memset(&obj, 0, sizeof(obj));
-        if (object_store_read(store, &cur, &obj) != 0 || obj.type != OBJ_COMMIT) {
-            object_free(&obj);
-            continue;
-        }
-        Commit c;
-        memset(&c, 0, sizeof(c));
-        commit_parse(obj.data, obj.size, &c);
-        object_free(&obj);
-        for (int i = 0; i < c.parent_count; i++) {
-            if (hash_equal(target, &c.parents[i])) {
-                commit_free(&c);
-                return 1;
-            }
-            if (tail < 1000) queue[tail++] = c.parents[i];
-        }
-        commit_free(&c);
-    }
-    return 0;
 }
 
 /* ---------- 网络推送（git-receive-pack） ---------- */
@@ -250,7 +219,7 @@ static int push_to_url(const char *url,
     /* 3. 快进检查（--force 时跳过，与真实 git 一致：服务端仍有最终拒绝权） */
     if (!force && !hash_is_zero(&old_hash)) {
         ObjectStore *store = object_store_open(".git");
-        int ff = store && commit_is_ancestor(store, &old_hash, local_hash);
+        int ff = store && graph_is_ancestor(store, &old_hash, local_hash);
         if (store) object_store_close(store);
         if (!ff) {
             mgit_error("failed to push: non-fast-forward "
@@ -317,7 +286,7 @@ static int push_to_url(const char *url,
     } else {
         int ff = 0;
         ObjectStore *chk = object_store_open(".git");
-        if (chk) { ff = commit_is_ancestor(chk, &old_hash, local_hash); object_store_close(chk); }
+        if (chk) { ff = graph_is_ancestor(chk, &old_hash, local_hash); object_store_close(chk); }
         if (ff) {
             printf("   %.7s..%.7s  %s -> %s\n", old_hex, new_hex,
                    branch, branch);
@@ -420,7 +389,7 @@ static int push_run(int argc, char **argv) {
         if (!hash_equal(&remote_hash, &local_hash)) {
             ObjectStore *local_store = object_store_open(".git");
             int ff = local_store &&
-                     commit_is_ancestor(local_store, &remote_hash, &local_hash);
+                     graph_is_ancestor(local_store, &remote_hash, &local_hash);
             if (local_store) object_store_close(local_store);
             remote_ff = ff;
             if (!ff && !force) {

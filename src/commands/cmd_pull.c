@@ -10,10 +10,12 @@
 /*
  * mgit pull [<remote>] [<branch>]
  *
- * = fetch + merge 的组合命令（porcelain 组合，与真实 git 一致）
+ * Git 的概念是 pull = fetch + integrate。
+ * 真实 Git 的 integrate 可以选择 merge / rebase / fast-forward-only 等策略；
+ * mgit 为教学简化，只选择最直观的 merge 路线：
  *
  * 1. fetch：从远程下载对象，更新 refs/remotes/<remote>/<branch> 跟踪分支
- * 2. merge：把 refs/remotes/<remote>/<branch> 合并进当前分支
+ * 2. merge：把该远程跟踪分支合并进当前分支
  *
  * 默认 remote 为 origin，默认 branch 为当前分支。
  */
@@ -49,9 +51,10 @@ static int pull_run(int argc, char **argv) {
         if (!refs) return -1;
 
         char head_ref[256];
-        if (ref_get_head_branch(refs, head_ref, sizeof(head_ref)) != 0) {
+        if (ref_get_head_branch(refs, head_ref, sizeof(head_ref)) != 0 ||
+            strcmp(head_ref, "HEAD") == 0) {
             ref_manager_close(refs);
-            mgit_error("no current branch (no commits yet?)");
+            mgit_error("pull needs a current branch (detached HEAD is not supported)");
             return -1;
         }
         ref_manager_close(refs);

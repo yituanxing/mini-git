@@ -11,28 +11,37 @@
 #include <string.h>
 
 /*
- * mgit reset [--hard] <commit>
- * 
- * 重置当前分支指针
- * 
- * 这是理解"分支只是指针"的关键命令：
- * - reset 不删除任何 commit
- * - 只是移动分支指针
- * - commit 对象仍然存在于对象存储中
+ * mgit reset [--soft|--mixed|--hard] <commit>
  *
- * --hard：同时把 Index 和工作区同步为目标 commit 的 tree
- * （与真实 git reset --hard 一致，未提交的修改会丢失）
+ * reset 是理解 Git "三棵树"最直接的命令：
+ *
+ *                 HEAD        Index       Working Tree
+ *   --soft         reset       keep        keep
+ *   --mixed        reset       reset       keep    (默认)
+ *   --hard         reset       reset       reset
+ *
+ * reset 不会修改旧 commit 对象；它移动引用，并按模式决定是否同步
+ * Index / 工作区。旧 commit 失去引用后仍可通过 reflog 找回。
  */
 
+typedef enum {
+    RESET_SOFT,
+    RESET_MIXED,
+    RESET_HARD
+} ResetMode;
+
 static void reset_help(void) {
-    printf("usage: mgit reset [--hard] <commit-hash>\n\n");
-    printf("Reset current branch to a specific commit.\n\n");
-    printf("This moves the branch pointer without deleting any objects.\n");
-    printf("With --hard, the index and working tree are also reset.\n");
+    printf("usage: mgit reset [--soft | --mixed | --hard] <commit-hash>\n\n");
+    printf("Reset current HEAD to a specific commit.\n\n");
+    printf("Modes:\n");
+    printf("    --soft     Move HEAD only; keep Index and working tree\n");
+    printf("    --mixed    Move HEAD and reset Index; keep working tree (default)\n");
+    printf("    --hard     Move HEAD and reset Index + working tree\n");
 }
 
-/* 把工作区和 Index 恢复为指定 commit 的 tree（--hard 用） */
-static int reset_hard_worktree(ObjectStore *store, Index *idx, const Hash *commit_hash) {
+/* 读取目标 commit 的 tree，并按模式同步 Index / 工作区。 */
+static int reset_state(ObjectStore *store, Index *idx, const Hash *commit_hash,
+                       ResetMode mode) {
     Object obj;
     memset(&obj, 0, sizeof(obj));
     if (object_store_read(store, commit_hash, &obj) != 0) return -1;
@@ -58,8 +67,15 @@ static int reset_hard_worktree(ObjectStore *store, Index *idx, const Hash *commi
     object_free(&tree_obj);
     commit_free(&c);
 
-    tree_restore_worktree(store, idx, &tree);
+    int ret;
+    if (mode == RESET_HARD) {
+        ret = tree_restore_worktree(store, idx, &tree);
+    } else {
+        ret = tree_rebuild_index(store, idx, &tree);
+    }
     tree_free(&tree);
+
+    if (ret != 0) return -1;
     return index_write(idx);
 }
 
@@ -89,14 +105,21 @@ static int resolve_target(ObjectStore *store, RefManager *refs, const char *str,
 
 static int reset_run(int argc, char **argv) {
     const char *target = NULL;
-    int hard = 0;
+    ResetMode mode = RESET_MIXED;  /* 与真实 Git 一致：默认 mixed */
 
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--hard") == 0) {
-            hard = 1;
-        } else if (argv[i][0] != '-') {
+        if (strcmp(argv[i], "--soft") == 0) {
+            mode = RESET_SOFT;
+        } else if (strcmp(argv[i], "--mixed") == 0) {
+            mode = RESET_MIXED;
+        } else if (strcmp(argv[i], "--hard") == 0) {
+            mode = RESET_HARD;
+        } else if (argv[i][0] == '-') {
+            mgit_error("unknown reset option: %s", argv[i]);
+            reset_help();
+            return -1;
+        } else if (!target) {
             target = argv[i];
-            break;
         }
     }
 
@@ -144,8 +167,11 @@ static int reset_run(int argc, char **argv) {
         }
     }
 
-    /* --hard：同步 Index 和工作区（在移动指针前完成，失败则不移动） */
-    if (hard) {
+    /*
+     * --soft 只移动引用；
+     * --mixed/--hard 在移动引用前先同步需要同步的状态，失败则不移动 HEAD。
+     */
+    if (mode != RESET_SOFT) {
         Index *idx = index_open(".git");
         if (!idx) {
             mgit_error("cannot open index");
@@ -153,8 +179,12 @@ static int reset_run(int argc, char **argv) {
             ref_manager_close(refs);
             return -1;
         }
-        if (reset_hard_worktree(store, idx, &target_hash) != 0) {
-            mgit_error("failed to reset working tree");
+        if (reset_state(store, idx, &target_hash, mode) != 0) {
+            if (mode == RESET_HARD) {
+                mgit_error("failed to reset index and working tree");
+            } else {
+                mgit_error("failed to reset index");
+            }
             index_close(idx);
             object_store_close(store);
             ref_manager_close(refs);

@@ -1,5 +1,8 @@
 #include "../command.h"
 #include "../core/ref.h"
+#include "../core/object.h"
+#include "../core/commit.h"
+#include "../core/graph.h"
 #include "../base/hash.h"
 #include "../base/error.h"
 
@@ -85,6 +88,33 @@ static int branch_run(int argc, char **argv) {
                 ref_manager_close(refs);
                 return -1;
             }
+        }
+
+        /*
+         * -d 是安全删除：分支 tip 必须已经在当前 HEAD 的历史里。
+         * mgit 不实现 upstream 配置，因此用 HEAD 作为合并判断基准。
+         */
+        Hash branch_hash, head_hash;
+        if (ref_resolve_quiet(refs, name, &branch_hash) != 0 ||
+            ref_resolve_head_quiet(refs, &head_hash) != 0) {
+            mgit_error("cannot determine merge status of branch '%s'", name);
+            ref_manager_close(refs);
+            return -1;
+        }
+
+        ObjectStore *store = object_store_open(".git");
+        if (!store) {
+            ref_manager_close(refs);
+            return -1;
+        }
+        int merged = graph_is_ancestor(store, &branch_hash, &head_hash);
+        object_store_close(store);
+
+        if (!merged) {
+            mgit_error("branch '%s' is not fully merged into HEAD", name);
+            mgit_error("refusing safe delete");
+            ref_manager_close(refs);
+            return -1;
         }
 
         if (ref_delete_branch(refs, name) != 0) {

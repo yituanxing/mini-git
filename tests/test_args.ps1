@@ -112,14 +112,22 @@ Check '18. log side shows side-commit' ($lgs -match 'side-commit')
 Check '19. log master hides side-commit' (-not ($lgm -match 'side-commit'))
 Check '20. log master still shows c1' ($lgm -match 'c1')
 
-# ---------- 7. branch -d ----------
+# ---------- 7. branch -d (safe delete) ----------
+# side has unique work and is not merged into master: -d must refuse it.
 $r = Run $d @('branch','-d','side')
-Check '21. branch -d exits ok' ($r.Code -eq 0)
-Check '22. branch -d reports deletion' ($r.Out -match 'Deleted branch side')
+Check '21. branch -d refuses unmerged branch' ($r.Code -ne 0)
 $br = (Run $d @('branch')).Out
-Check '23. deleted branch no longer listed' (-not ($br -match 'side'))
+Check '22. refused branch remains listed' ($br -match 'side')
+
+# A branch at current HEAD is fully merged and may be safely deleted.
+$r = Run $d @('branch','done')
+$r = Run $d @('branch','-d','done')
+Check '23. branch -d deletes merged branch' ($r.Code -eq 0)
+$br = (Run $d @('branch')).Out
+Check '24. deleted merged branch no longer listed' (-not ($br -match 'done'))
+
 $r = Run $d @('branch','-d','master')
-Check '24. cannot delete current branch' ($r.Code -ne 0)
+Check '25. cannot delete current branch' ($r.Code -ne 0)
 
 # ---------- 8. tag -l ----------
 $r = Run $d @('tag','v1.0')

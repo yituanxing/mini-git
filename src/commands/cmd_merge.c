@@ -2,6 +2,7 @@
 #include "../core/object.h"
 #include "../core/tree.h"
 #include "../core/commit.h"
+#include "../core/graph.h"
 #include "../core/ref.h"
 #include "../core/index.h"
 #include "../core/linemerge.h"
@@ -50,35 +51,6 @@ static void ensure_parent_dir(const char *path) {
     }
 }
 
-/* 检查 hash 是否在 ancestors 链表中（BFS 向上遍历） */
-static int is_ancestor(ObjectStore *store, const Hash *target, const Hash *start) {
-    if (hash_equal(target, start)) return 1;
-
-    /* 简单的 BFS：最多遍历 1000 个 commit */
-    Hash queue[1000];
-    int head = 0, tail = 0;
-    queue[tail++] = *start;
-
-    while (head < tail && head < 999) {
-        Hash current = queue[head++];
-        Commit commit;
-        memset(&commit, 0, sizeof(commit));
-        if (commit_read(store, &current, &commit) != 0) continue;
-
-        for (int i = 0; i < commit.parent_count; i++) {
-            if (hash_equal(target, &commit.parents[i])) {
-                commit_free(&commit);
-                return 1;
-            }
-            if (tail < 1000) {
-                queue[tail++] = commit.parents[i];
-            }
-        }
-        commit_free(&commit);
-    }
-    return 0;
-}
-
 /* 找 merge base：从 ours 开始 BFS，找第一个也在 theirs 历史中的 commit */
 static int find_merge_base(ObjectStore *store, const Hash *ours, const Hash *theirs,
                            Hash *base_out) {
@@ -90,7 +62,7 @@ static int find_merge_base(ObjectStore *store, const Hash *ours, const Hash *the
         Hash current = queue[head++];
 
         /* 检查 current 是否在 theirs 的历史中 */
-        if (is_ancestor(store, &current, theirs)) {
+        if (graph_is_ancestor(store, &current, theirs)) {
             *base_out = current;
             return 0;
         }
@@ -320,6 +292,79 @@ static int three_way_merge(ObjectStore *store, Index *idx,
     return changes;
 }
 
+/*
+ * 教学版 merge 采用保守的 pre-merge contract：
+ * - Index 必须与 HEAD 一致（没有 staged changes）
+ * - 已跟踪 Working Tree 必须与 Index 一致（没有 unstaged changes）
+ * - 目标提交即将写入的路径不能覆盖本地 untracked 文件
+ *
+ * 真实 Git 对某些不重叠本地修改更宽松；mgit 宁可更严格，也不静默覆盖。
+ */
+static int merge_precheck(ObjectStore *store, Index *idx,
+                          const Hash *ours_commit, const Hash *theirs_commit) {
+    Commit ours;
+    memset(&ours, 0, sizeof(ours));
+    if (commit_read(store, ours_commit, &ours) != 0) return -1;
+
+    Hash index_tree;
+    if (index_write_tree(idx, store, &index_tree) != 0) {
+        commit_free(&ours);
+        return -1;
+    }
+
+    if (!hash_equal(&index_tree, &ours.tree)) {
+        commit_free(&ours);
+        mgit_error("cannot merge with staged changes");
+        mgit_error("commit or reset the Index before merging");
+        return -1;
+    }
+    commit_free(&ours);
+
+    for (size_t i = 0; i < idx->count; i++) {
+        uint8_t *data = NULL;
+        size_t size = 0;
+        if (file_read_all(idx->entries[i].name, &data, &size) != 0) {
+            mgit_error("cannot merge with unstaged deletion: %s",
+                       idx->entries[i].name);
+            return -1;
+        }
+
+        Hash wt_hash;
+        object_hash(OBJ_BLOB, data, size, &wt_hash);
+        free(data);
+        if (!hash_equal(&wt_hash, &idx->entries[i].hash)) {
+            mgit_error("cannot merge with unstaged changes: %s",
+                       idx->entries[i].name);
+            mgit_error("commit or stash your changes before merging");
+            return -1;
+        }
+    }
+
+    Tree theirs_tree = {0};
+    if (commit_read_tree(store, theirs_commit, &theirs_tree) != 0) return -1;
+
+    TreeFlatEntry *flat = NULL;
+    size_t count = 0;
+    if (tree_flatten(store, &theirs_tree, &flat, &count) != 0) {
+        tree_free(&theirs_tree);
+        return -1;
+    }
+
+    for (size_t i = 0; i < count; i++) {
+        if (!index_find(idx, flat[i].path) && file_exists(flat[i].path)) {
+            mgit_error("untracked file would be overwritten by merge: %s",
+                       flat[i].path);
+            free(flat);
+            tree_free(&theirs_tree);
+            return -1;
+        }
+    }
+
+    free(flat);
+    tree_free(&theirs_tree);
+    return 0;
+}
+
 static int merge_run(int argc, char **argv) {
     if (argc < 2) {
         mgit_error("no branch specified");
@@ -353,6 +398,17 @@ static int merge_run(int argc, char **argv) {
         return -1;
     }
 
+    char ours_ref[256];
+    if (ref_get_head_branch(refs, ours_ref, sizeof(ours_ref)) != 0 ||
+        strcmp(ours_ref, "HEAD") == 0 ||
+        strncmp(ours_ref, "refs/heads/", 11) != 0) {
+        mgit_error("mgit merge requires a current branch");
+        mgit_error("detached HEAD merge is intentionally not supported");
+        ref_manager_close(refs);
+        object_store_close(store);
+        return -1;
+    }
+
     /* 获取目标分支（theirs）：通用解析（分支/完整引用路径/tag），失败再当哈希 */
     Hash theirs_commit;
     if (ref_resolve_quiet(refs, theirs_branch, &theirs_commit) != 0) {
@@ -366,26 +422,33 @@ static int merge_run(int argc, char **argv) {
     }
 
     /* 检查是否已经合并（theirs 是 ours 的祖先） */
-    if (is_ancestor(store, &theirs_commit, &ours_commit)) {
+    if (graph_is_ancestor(store, &theirs_commit, &ours_commit)) {
         printf("Already up to date.\n");
         ref_manager_close(refs);
         object_store_close(store);
         return 0;
     }
 
-    /* 获取当前分支名 */
+    /* 当前分支已在上面验证为 refs/heads/<name>。 */
     char ours_branch[256];
-    if (ref_get_head_branch(refs, ours_branch, sizeof(ours_branch)) != 0) {
-        snprintf(ours_branch, sizeof(ours_branch), "HEAD");
-    } else {
-        /* 提取分支名 */
-        if (strncmp(ours_branch, "refs/heads/", 11) == 0) {
-            memmove(ours_branch, ours_branch + 11, strlen(ours_branch + 11) + 1);
-        }
+    snprintf(ours_branch, sizeof(ours_branch), "%s", ours_ref + 11);
+
+    Index *pre_idx = index_open(".git");
+    if (!pre_idx) {
+        ref_manager_close(refs);
+        object_store_close(store);
+        return -1;
     }
+    if (merge_precheck(store, pre_idx, &ours_commit, &theirs_commit) != 0) {
+        index_close(pre_idx);
+        ref_manager_close(refs);
+        object_store_close(store);
+        return -1;
+    }
+    index_close(pre_idx);
 
     /* 检查 Fast-Forward：ours 是 theirs 的祖先 */
-    if (is_ancestor(store, &ours_commit, &theirs_commit)) {
+    if (graph_is_ancestor(store, &ours_commit, &theirs_commit)) {
         /* Fast-Forward！直接移动分支指针 */
         printf("Fast-forward\n");
 
