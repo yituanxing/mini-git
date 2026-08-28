@@ -5,6 +5,7 @@
 #include "../core/ref.h"
 #include "../core/index.h"
 #include "../base/hash.h"
+#include "../base/file.h"
 #include "../base/error.h"
 
 #include <stdio.h>
