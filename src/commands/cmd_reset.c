@@ -180,9 +180,11 @@ static int reset_run(int argc, char **argv) {
             return -1;
         }
         if (reset_state(store, idx, &target_hash, mode) != 0) {
-            mgit_error(mode == RESET_HARD
-                       ? "failed to reset index and working tree"
-                       : "failed to reset index");
+            if (mode == RESET_HARD) {
+                mgit_error("failed to reset index and working tree");
+            } else {
+                mgit_error("failed to reset index");
+            }
             index_close(idx);
             object_store_close(store);
             ref_manager_close(refs);
