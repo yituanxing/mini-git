@@ -2,6 +2,7 @@
 #include "../core/ref.h"
 #include "../core/object.h"
 #include "../core/commit.h"
+#include "../core/graph.h"
 #include "../base/hash.h"
 #include "../base/error.h"
 
@@ -26,32 +27,6 @@ static void branch_help(void) {
     printf("    (no args)    List all branches\n");
     printf("    <name>       Create a new branch\n");
     printf("    -d <name>    Delete a branch\n");
-}
-
-/* target 是否已经包含在 start 的提交历史中。 */
-static int branch_is_merged(ObjectStore *store, const Hash *target, const Hash *start) {
-    if (hash_equal(target, start)) return 1;
-
-    Hash queue[1000];
-    int head = 0, tail = 0;
-    queue[tail++] = *start;
-
-    while (head < tail && head < 1000) {
-        Hash cur = queue[head++];
-        Commit commit;
-        memset(&commit, 0, sizeof(commit));
-        if (commit_read(store, &cur, &commit) != 0) continue;
-
-        for (int i = 0; i < commit.parent_count; i++) {
-            if (hash_equal(target, &commit.parents[i])) {
-                commit_free(&commit);
-                return 1;
-            }
-            if (tail < 1000) queue[tail++] = commit.parents[i];
-        }
-        commit_free(&commit);
-    }
-    return 0;
 }
 
 static int branch_run(int argc, char **argv) {
@@ -132,7 +107,7 @@ static int branch_run(int argc, char **argv) {
             ref_manager_close(refs);
             return -1;
         }
-        int merged = branch_is_merged(store, &branch_hash, &head_hash);
+        int merged = graph_is_ancestor(store, &branch_hash, &head_hash);
         object_store_close(store);
 
         if (!merged) {
