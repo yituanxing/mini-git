@@ -114,10 +114,10 @@ static int status_run(int argc, char **argv) {
         return -1;
     }
 
-    /* 显示当前分支 */
+    /* 显示 HEAD 状态：符号引用属于分支；直接引用属于 detached HEAD。 */
     char branch[256];
-    if (ref_get_head_branch(refs, branch, sizeof(branch)) == 0) {
-        /* 提取分支名 */
+    if (ref_get_head_branch(refs, branch, sizeof(branch)) == 0 &&
+        strcmp(branch, "HEAD") != 0) {
         const char *name = branch;
         if (strncmp(branch, "refs/heads/", 11) == 0) {
             name = branch + 11;
